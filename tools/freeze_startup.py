@@ -148,20 +148,26 @@ def _scheduler_freeze(model_config, dtype: str = "float32") -> dict:
     import torch  # noqa: F401
     from models.pipeline import DEFAULT_TIMESTEPS, build_scheduler
 
-    # Dev (flow_match) scheduler structural config only — no denoising step.
+    # Dev T2I (non-editing) uses the "flash" stochastic flow-match scheduler.
+    # Structural config only — no denoising step. Editing (single ref image)
+    # uses "flow_match"; the full model uses "default" (FlowUniPC). Structural
+    # timesteps/sigmas are identical between "flash" and "flow_match" for Dev
+    # (same DEFAULT_TIMESTEPS, shift=1.0); only step() semantics differ.
     num_steps = 28
     shift = 1.0
     device = "cpu"
-    sched = build_scheduler(num_steps, list(DEFAULT_TIMESTEPS), shift, device, "flow_match")
+    sched = build_scheduler(num_steps, list(DEFAULT_TIMESTEPS), shift, device, "flash")
 
     return {
-        "scheduler_name": "flow_match",
+        "scheduler_name": "flash",
         "num_inference_steps": num_steps,
         "shift": shift,
         "timesteps": [int(t) for t in sched.timesteps.tolist()],
         "sigmas": [float(s) for s in sched.sigmas.tolist()],
         "patch_size": 32,
-        "noise_scale": 8.0,
+        "noise_scale_start": 8.0,
+        "noise_scale_end": 8.0,
+        "noise_clip_std": 8.0,
         "t_eps": 0.001,
         "condition_image_size": 384,
     }
