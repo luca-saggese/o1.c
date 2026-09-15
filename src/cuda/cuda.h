@@ -117,6 +117,28 @@ void hd_attention_eager(const void *q_dev, const void *k_dev, const void *v_dev,
 void hd_head_split(const void *in_dev, void *out_dev, int seq, int heads, int dim);
 void hd_head_merge(const void *in_dev, void *out_dev, int seq, int heads, int dim);
 
+/*
+ * Row-gather embedding lookup (class A, byte-copy). table [nrows, cols]
+ * bf16, idx [M] int64 -> out [M, cols] bf16. Out-of-range idx fall back to
+ * padding row 0. Caller provides device buffers; no allocation.
+ */
+void hd_gather_rows(const void *table_dev, const void *idx_dev, void *out_dev,
+                    int M, int cols, int64_t nrows);
+
+/*
+ * Timestep conditioning (class A copy): out[row] = t_emb when idx[row]==tms_id
+ * else emb[row] (broadcast of the single [H] t_emb across matching rows).
+ * Used to reproduce `torch.where(tms_mask, t_emb_expanded, inputs_embeds)`.
+ */
+void hd_apply_tms_condition(const void *idx_dev, const void *emb_dev,
+                            const void *t_emb_dev, void *out_dev,
+                            int M, int H, int64_t tms_id);
+
+/* y[i] = x[i] * s elementwise fp32 (used to scale timestep by 1000). */
+void hd_scale_f32(const float *in_dev, float *out_dev, float s, int n);
+/* y = f32-to-bf16 device conversion (used for the freq table cast). */
+void hd_f32_convert_bf16(const float *in_dev, void *out_dev, int n);
+
 /* ------------------------------------------------------------------ */
 /* cuBLAS cross-check helper (used by the harness, not the kernels)    */
 /* ------------------------------------------------------------------ */

@@ -18,7 +18,7 @@ TEST_W_BIN := build/test_weights
 CUBIN      := build/obj/cuda
 CUDA_OBJS  := $(CUBIN)/support.o $(CUBIN)/norm.o $(CUBIN)/act.o \
               $(CUBIN)/gemm.o $(CUBIN)/rope.o $(CUBIN)/attn.o \
-              $(CUBIN)/residual.o
+              $(CUBIN)/residual.o $(CUBIN)/embed.o
 TEST_P_BIN := build/test_primitives
 TEST_P_SRCS := tests/unit/test_primitives.c $(CORE_SRCS)
 TEST_P_OBJS := $(TEST_P_SRCS:.c=.o)
@@ -30,7 +30,7 @@ TEST_BLOCK_BIN := build/test_block
 TEST_BLOCK_SRCS := tests/unit/test_block.c src/model/block.c $(CORE_SRCS) src/model/weights.c
 TEST_BLOCK_OBJS := $(TEST_BLOCK_SRCS:.c=.o)
 
-SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c
+SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c src/model/forward.c
 OBJS      := $(SRCS:.c=.o)
 
 TEST_SRCS   := tests/unit/test_model_loader.c src/model/model.c src/io/json.c
