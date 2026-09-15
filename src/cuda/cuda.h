@@ -140,6 +140,24 @@ void hd_scale_f32(const float *in_dev, float *out_dev, float s, int n);
 void hd_f32_convert_bf16(const float *in_dev, void *out_dev, int n);
 
 /* ------------------------------------------------------------------ */
+/* M1.5 scheduler kernels (contract section 7, fp32 pointwise)         */
+/* ------------------------------------------------------------------ */
+
+/* out[i] = bf16_to_f32(in[i])  (upcast of the current sample z). */
+void hd_sched_bf16_upcast(const void *in_dev, float *out_dev, int n);
+/* denoised[i] = z[i] - model_output[i] * sigma  (fp32, torch order). */
+void hd_sched_denoised(const float *z_dev, const float *mo_dev, float sigma,
+                       float *denoised_dev, int n);
+/* z_next[i] = (sigma_next*noise[i])*s_noise + (1.0f-sigma_next)*denoised[i]
+ * fp32, torch left-to-right (sigma_next*noise)*s_noise. */
+void hd_sched_z_next(const float *noise_dev, const float *denoised_dev,
+                     float sigma_next, float s_noise, float *z_next_dev, int n);
+/* model_output[i] = (z[i] - x_pred_masked[i]) / sigma  (fp32, folded
+ * v_cond = (xp - z)/sigma; model_output = -v_guided). */
+void hd_sched_vcond(const void *z_dev, const void *xp_dev, float sigma,
+                    float *mo_dev, int n);
+
+/* ------------------------------------------------------------------ */
 /* cuBLAS cross-check helper (used by the harness, not the kernels)    */
 /* ------------------------------------------------------------------ */
 

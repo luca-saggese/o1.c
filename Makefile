@@ -18,7 +18,7 @@ TEST_W_BIN := build/test_weights
 CUBIN      := build/obj/cuda
 CUDA_OBJS  := $(CUBIN)/support.o $(CUBIN)/norm.o $(CUBIN)/act.o \
               $(CUBIN)/gemm.o $(CUBIN)/rope.o $(CUBIN)/attn.o \
-              $(CUBIN)/residual.o $(CUBIN)/embed.o
+              $(CUBIN)/residual.o $(CUBIN)/embed.o $(CUBIN)/sched.o
 TEST_P_BIN := build/test_primitives
 TEST_P_SRCS := tests/unit/test_primitives.c $(CORE_SRCS)
 TEST_P_OBJS := $(TEST_P_SRCS:.c=.o)
@@ -37,6 +37,10 @@ TEST_FF_OBJS := $(TEST_FF_SRCS:.c=.o)
 TEST_TAIL_BIN := build/test_block_tail
 TEST_TAIL_SRCS := tests/unit/test_block_tail.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_TAIL_OBJS := $(TEST_TAIL_SRCS:.c=.o)
+
+TEST_M15_BIN := build/test_m1_5_scheduler
+TEST_M15_SRCS := tests/unit/test_m1_5_scheduler.c src/model/block.c src/model/forward.c src/model/scheduler.c $(CORE_SRCS) src/model/weights.c
+TEST_M15_OBJS := $(TEST_M15_SRCS:.c=.o)
 
 SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c src/model/forward.c
 OBJS      := $(SRCS:.c=.o)
@@ -62,6 +66,9 @@ test-block: $(TEST_BLOCK_BIN)
 
 test-full-forward: $(TEST_FF_BIN)
 	./$(TEST_FF_BIN)
+
+test-m15: $(TEST_M15_BIN)
+	./$(TEST_M15_BIN)
 
 test-tokenizer: $(TEST_TOK_BIN)
 	./$(TEST_TOK_BIN)
@@ -94,6 +101,10 @@ $(TEST_TAIL_BIN): $(TEST_TAIL_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_TAIL_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
 
+$(TEST_M15_BIN): $(TEST_M15_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_M15_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
+
 $(BIN): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
@@ -110,4 +121,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 clean
