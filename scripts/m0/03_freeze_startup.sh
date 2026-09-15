@@ -14,7 +14,12 @@ die() { printf '[freeze][ERROR] %s\n' "$*" >&2; exit 1; }
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-python3 - "${ROOT}" "${PROFILE}" <<'PY'
+# The oracle requires transformers 4.57.1 (pinned in the venv); the system
+# python may carry an incompatible transformers. Use the pinned venv.
+PYBIN="${ROOT}/.venv/bin/python"
+[ -x "${PYBIN}" ] || die "pinned venv not found at ${PYBIN}"
+
+"${PYBIN}" - "${ROOT}" "${PROFILE}" <<'PY'
 import json, os, sys
 root, profile = sys.argv[1], sys.argv[2]
 sys.path.insert(0, os.path.join(root, "python"))
