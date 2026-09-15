@@ -1,7 +1,7 @@
 {
   "profile": "dev",
   "hf_repo": "HiDream-ai/HiDream-O1-Image-Dev-2604",
-  "immutable_revision": "",
+  "immutable_revision": "b6acc2fe452b3120430620dc4354fa442ee081ea",
   "local_path": "models/dev",
   "model_type": "dev",
   "num_inference_steps": 28,

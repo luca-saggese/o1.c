@@ -1,7 +1,7 @@
 {
   "profile": "base",
   "hf_repo": "HiDream-ai/HiDream-O1-Image",
-  "immutable_revision": "",
+  "immutable_revision": "0b0901d99f200389e138c61946af1185f5f49a13",
   "local_path": "models/base",
   "model_type": "full",
   "num_inference_steps": 50,
