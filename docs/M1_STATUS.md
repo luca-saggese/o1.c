@@ -2,9 +2,9 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.4 (whole-model forward, first Python forward)
-- **Last green gate:** M1.4 STARTED — entry state verified (check-env/check-locks PASS, oracle `3237a63` clean, Dev `b6acc2f` downloaded, M1.3 fixture PASS), capture under construction
-- **Engine HEAD:** `a12e254`
+- **Current sub-step:** M1.4 — native full-forward implementation (golden captured)
+- **Last green gate:** M1.4 golden captured — 1 V3 whole-forward run (fixture `M1_V3_DEV_FORWARD_0`, S=23, timestep=999, all 11 checkpoints, all finite, bin sha `f373e9a0`)
+- **Engine HEAD:** `ffe2eab`
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
