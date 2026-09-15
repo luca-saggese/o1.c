@@ -84,6 +84,7 @@ typedef struct {
     void *after_embedding;            /* [text,H]   step1  */
     void *after_timestep_conditioning;/* [text,H]   step3  */
     void *after_target_embedding;     /* [img,H]    step4  */
+    void *after_block_0_input;        /* [S,H]      seq concat, step5 */
     void *after_block_0;              /* [S,H]      layer 0*/
     void *after_block_mid;            /* [S,H]      layer mid*/
     void *after_block_last;           /* [S,H]      layer N-1  */
@@ -142,5 +143,17 @@ hd_status hd_forward(const hd_forward_binding *bw,
 
 /* Returns the number of layers bound (for introspection). */
 int hd_forward_num_layers(const hd_forward_binding *bw);
+
+/*
+ * Return byte offset (from ws->hidden_a base) of a named workspace region,
+ * or -1 if unknown. Used by debug harnesses to inspect intermediates in the
+ * SAME workspace the forward used (no separate debug forward).
+ * Valid names: hidden_a hidden_b h_text norm_out head_out t_emb te_hidden
+ * freq freq_bf16 t_scaled xe_stage xe_out block_scratch
+ */
+int64_t hd_forward_ws_offset(const char *name, int64_t seq, int text_len,
+                             int img_tokens, int heads, int kv_heads,
+                             int hidden, int ff_hidden, int head_dim,
+                             int64_t *block_scratch_bytes);
 
 #endif /* HD_FORWARD_H */

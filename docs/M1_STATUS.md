@@ -2,17 +2,17 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.4 — native full-forward implementation (golden captured)
-- **Last green gate:** M1.4 golden captured — 1 V3 whole-forward run (fixture `M1_V3_DEV_FORWARD_0`, S=23, timestep=999, all 11 checkpoints, all finite, bin sha `f373e9a0`)
-- **Engine HEAD:** `ffe2eab`
+- **Current sub-step:** M1.4 — native full-forward validation (PASS)
+- **Last green gate:** M1.4 whole forward — `test_full_forward` 14/14 assertions PASS (block_last 0.0246, final_norm 0.0871, complete 0.1409 within drift-amplification envelope); tail machinery self-consistency exact (nrmse=0); drift prediction ratio 1.000/1.001
+- **Engine HEAD:** `0737c4a` (M1.4 gate commit pending)
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
 - **FAST_VALIDATION_RES:** `64×64` (2×2 patches, 4 image tokens, seq 23)
 - **Oracle runs consumed (V2+):** 0
 - **Native runs consumed (V2+):** 0
-- **Known failures:** none
-- **Exact next action:** M1.4. One single whole-model Python forward capturing all diagnostic checkpoints in the same run (embedding, block 0, block middle, block last, final norm, final head, complete model output) — not three separate captures. Freeze goldens from that run, then wire the native device-resident path (block bindings + persistent workspace already in place) behind a host orchestrator and validate parity by block. Localize first divergence with the captured checkpoints at the cheapest level; do not rerun Python unnecessarily.
+- **Known failures:** none (M1.4 residual fully explained as bf16 drift amplification, contract §6)
+- **Exact next action:** M1.5 — scheduler. Implement Dev/Base flash-scheduler `step()` and deterministic denoising state; validate V4 1-step, then 3-step once 1-step passes. Commit `feat(m1): match hidream scheduler and deterministic denoising state`.
 
 ## Gate status
 
@@ -26,7 +26,7 @@
 | M1.3 decoder block | PASS | `0519b21`; block_out NRMSE 0.00527 cos 0.999988, 5 internals class D |
 | M1.3a arch freeze | PASS | `9bd7c12`; 3 contract docs + shape_inventory/buffer_plan JSON; 0 new Python forwards |
 | M1.3b device resident | PASS | `36e4a90`; block bindings resolved once, no strcmp scan / no H2D / no sync in block; block_out NRMSE 0.00527 cos 0.999988 == golden, golden NOT regenerated |
-| M1.4 whole forward | PENDING | — |
+| M1.4 whole forward | PASS | `test_full_forward` 14/14 (block_last 0.0246/0.99996, final_norm 0.0871/0.9963, complete 0.1409/0.9909 within contract §6 envelope); tail machinery self-consistency nrmse=0 exact; `tools/m1_4_drift_predict.py` ratio 1.000/1.001 |
 | M1.5 scheduler / 1–3 step | PENDING | — |
 | M1.6 tokenizer | PASS | committed; 17 frozen IDs exact |
 | M1.7 Dev closure | PENDING | — |
@@ -59,6 +59,20 @@
   sorted table, inventory, oracle fingerprint table, device placement,
   cleanup + repeat placement, Base profile intact). Total 101 assertions pass.
 - `.venv/bin/python tools/m1_guard.py check-locks` — `ok: true`, no problems.
+- `make test-full-forward` — M1.4 whole-forward gate: 14/14 assertions PASS.
+  embedding/target_embedding/timestep_conditioning/block_0/block_mid class D;
+  block_last 0.0246/0.99996, final_norm_input 0.0246, final_norm 0.0871/0.9963,
+  final_head_input 0.0871, complete_output 0.1409/0.9909 — all within the
+  contract §6 drift-amplification envelope (3e-2 / 0.1 / 0.18).
+- `./build/test_block_tail` — isolated-tail harness: machinery self-consistency
+  (seed=native block_mid) nrmse=0 cos=1 exact; golden-mid seed → native
+  layers 19–35 vs golden block_last nrmse=0.0098 cos=0.99997 (class D PASS);
+  norm+head self-consistency on golden block_last: final_norm 0.0029,
+  complete 0.0041 (bf16 storage floor).
+- `.venv/bin/python tools/m1_4_drift_predict.py` — oracle RMSNorm+head formula
+  (fp64) on native block_last predicts final_norm 0.087121 vs observed
+  0.087127 (ratio 1.000) and complete_output 0.14102 vs 0.14094 (ratio 1.001).
+  Proves norm/head correct; residual is bf16 input-drift amplification.
 
 ## Commands failed
 

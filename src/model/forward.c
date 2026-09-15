@@ -41,6 +41,12 @@
 /* Binding resolution                                                  */
 /* ------------------------------------------------------------------ */
 
+static int64_t forward_layout_offsets(int64_t seq, int text_len, int img_tokens,
+                                      int hidden, int heads, int kv_heads,
+                                      int ff_hidden, int head_dim,
+                                      int64_t out_off[16],
+                                      int64_t *block_scratch_bytes);
+
 static const void *resolve_one(const hd_weight_store *ws, const char *name) {
     for (int64_t i = 0; i < ws->n_allocs; i++) {
         if (ws->allocs[i].name[0] &&
@@ -104,6 +110,25 @@ void hd_forward_binding_free(hd_forward_binding *b) {
 
 int hd_forward_num_layers(const hd_forward_binding *bw) {
     return bw ? bw->n_layers : 0;
+}
+
+int64_t hd_forward_ws_offset(const char *name, int64_t seq, int text_len,
+                             int img_tokens, int heads, int kv_heads,
+                             int hidden, int ff_hidden, int head_dim,
+                             int64_t *block_scratch_bytes) {
+    if (!name) return -1;
+    int64_t off[16];
+    forward_layout_offsets(seq, text_len, img_tokens, hidden, heads, kv_heads,
+                           ff_hidden, head_dim, off, block_scratch_bytes);
+    struct { const char *n; int idx; } map[] = {
+        {"hidden_a",0},{"hidden_b",1},{"h_text",2},{"norm_out",3},
+        {"head_out",4},{"t_emb",5},{"te_hidden",6},{"freq",7},
+        {"freq_bf16",8},{"t_scaled",9},{"xe_stage",10},{"xe_out",11},
+        {"block_scratch",12},
+    };
+    for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); i++)
+        if (strcmp(map[i].n, name) == 0) return off[map[i].idx];
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -221,8 +246,13 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* mlp[0].weight [H,256] (out,in) -> transpose_w=1; bias added. */
     hd_linear(freq_bf16, bw->te0_w, bw->te0_b, te_hidden, 1, H, 256, 1);
     hd_silu(te_hidden, t_emb, (size_t)H);
-    /* mlp[2].weight [H,H] (out,in) -> transpose_w=1; bias added. */
-    hd_linear(t_emb, bw->te2_w, bw->te2_b, t_emb, 1, H, H, 1);
+    /* mlp[2].weight [H,H] (out,in) -> transpose_w=1; bias added.
+     * Do NOT write in place into t_emb: an M=1,N=K=H GEMM writing y==x
+     * races across tile blocks (later blockIdx.y overwrites rows other
+     * blocks still read). Route into the free te_hidden scratch, then
+     * D2D-copy the result back into t_emb. */
+    hd_linear(t_emb, bw->te2_w, bw->te2_b, te_hidden, 1, H, H, 1);
+    cudaMemcpy(t_emb, te_hidden, (size_t)H * 2, cudaMemcpyDeviceToDevice);
 
     /* ------------------------------------------------------------------ */
     /* Step 1 + 3: embed -> where(tms, t_emb, embed) -> h_text [T,H]      */
@@ -255,6 +285,9 @@ hd_status hd_forward(const hd_forward_binding *bw,
     cudaMemcpy(hidden_a, h_text, (size_t)T * H * 2, cudaMemcpyDeviceToDevice);
     cudaMemcpy((uint8_t *)hidden_a + (size_t)T * H * 2, xe_out,
                (size_t)I * H * 2, cudaMemcpyDeviceToDevice);
+    if (diag && diag->after_block_0_input)
+        cudaMemcpy(diag->after_block_0_input, hidden_a, (size_t)S * H * 2,
+                   cudaMemcpyDeviceToDevice);
 
     /* ------------------------------------------------------------------ */
     /* Step 6: decoder ping-pong. hd_decoder_block writes out_dev via a    */
