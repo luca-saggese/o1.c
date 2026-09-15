@@ -4,7 +4,7 @@
 
 - **Current sub-step:** M1.2 (reference CUDA transformer primitives)
 - **Last green gate:** M1.1 (weight ingestion and deterministic CUDA buffers)
-- **Engine HEAD:** `44f3429`
+- **Engine HEAD:** `670448a`
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
@@ -12,7 +12,7 @@
 - **Oracle runs consumed (V2+):** 0
 - **Native runs consumed (V2+):** 0
 - **Known failures:** none
-- **Exact next action:** implement M1.2 reference CUDA primitives (`src/cuda/`), no model forward.
+- **Exact next action:** M1.2 in flight: golden capture (Agent A) + CUDA primitives (Agent B) running in parallel under `docs/M1_2_GOLDEN_CONTRACT.md`; then merge, `make test`, commit `feat(m1): implement reference cuda transformer primitives`.
 
 ## Gate status
 
