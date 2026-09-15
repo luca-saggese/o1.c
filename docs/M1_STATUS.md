@@ -2,9 +2,9 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.3a (pre-forward architecture freeze)
-- **Last green gate:** M1.3 (one decoder block parity)
-- **Engine HEAD:** `0519b21`
+- **Current sub-step:** M1.4 (whole-model forward, first Python forward)
+- **Last green gate:** M1.3b (device-resident forward workspace)
+- **Engine HEAD:** `36e4a90`
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
@@ -12,7 +12,7 @@
 - **Oracle runs consumed (V2+):** 0
 - **Native runs consumed (V2+):** 0
 - **Known failures:** none
-- **Exact next action:** M1.3a in progress. Docs frozen (`M1_FORWARD_CONTRACT.md`, `M1_MEMORY_LIFETIMES.md`, `M1_EXECUTION_ARCHITECTURE.md`, `M2/M3_CANDIDATES.md`, `artifacts/m1/{shape_inventory,buffer_plan}.json`). Remaining M1.3a: M1.3b device-resident workspace refactor (bind weights to direct layer access, remove `strcmp` scan in `block.c`, verify zero hot-path allocations/copies), revalidate block fixture, commit `docs(m1): freeze forward topology shapes and buffer lifetimes` + `refactor(m1): establish device-resident forward workspace`. Then M1.4 (one whole-model Python forward with all diagnostic checkpoints).
+- **Exact next action:** M1.4. One single whole-model Python forward capturing all diagnostic checkpoints in the same run (embedding, block 0, block middle, block last, final norm, final head, complete model output) — not three separate captures. Freeze goldens from that run, then wire the native device-resident path (block bindings + persistent workspace already in place) behind a host orchestrator and validate parity by block. Localize first divergence with the captured checkpoints at the cheapest level; do not rerun Python unnecessarily.
 
 ## Gate status
 
@@ -24,7 +24,8 @@
 | M1.1 weight ingestion | PASS | `make test`; inventory 759/759 exact, 17 probe fingerprints == oracle, 759 CUDA allocs / 35,219,551,168 B, cleanup verified |
 | M1.2 CUDA primitives | PASS | `3468ab3`; `make test` 33+18 fixture green, bf16/class B/C/D |
 | M1.3 decoder block | PASS | `0519b21`; block_out NRMSE 0.00527 cos 0.999988, 5 internals class D |
-| M1.3a arch freeze | IN PROGRESS | docs frozen; M1.3b pending; 0 new Python forwards |
+| M1.3a arch freeze | PASS | `9bd7c12`; 3 contract docs + shape_inventory/buffer_plan JSON; 0 new Python forwards |
+| M1.3b device resident | PASS | `36e4a90`; block bindings resolved once, no strcmp scan / no H2D / no sync in block; block_out NRMSE 0.00527 cos 0.999988 == golden, golden NOT regenerated |
 | M1.4 whole forward | PENDING | — |
 | M1.5 scheduler / 1–3 step | PENDING | — |
 | M1.6 tokenizer | PASS | committed; 17 frozen IDs exact |
