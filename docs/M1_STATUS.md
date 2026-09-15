@@ -2,9 +2,9 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.1 (weight ingestion and deterministic buffers)
-- **Last green gate:** M1.0 (native profile/config/manifest loader)
-- **Engine HEAD:** `c71c311`
+- **Current sub-step:** M1.2 (reference CUDA transformer primitives)
+- **Last green gate:** M1.1 (weight ingestion and deterministic CUDA buffers)
+- **Engine HEAD:** `31ba4f0`
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
@@ -12,7 +12,7 @@
 - **Oracle runs consumed (V2+):** 0
 - **Native runs consumed (V2+):** 0
 - **Known failures:** none
-- **Exact next action:** commit guardrails, then M1.0 native loader.
+- **Exact next action:** implement M1.2 reference CUDA primitives (`src/cuda/`), no model forward.
 
 ## Gate status
 
@@ -21,8 +21,7 @@
 | M0 (baseline) | PASS | `891ed61`; locks/manifests consistent |
 | M1 preflight (guardrails) | PASS | `tools/m1_guard.py` (`check-env`/`check-locks` green) |
 | M1.0 native loader | PASS | `make test`; dev 759/759, param_count exact, base parses, unknown/missing fail closed |
-| M1.0 native loader | PENDING | — |
-| M1.1 weight ingestion | PENDING | — |
+| M1.1 weight ingestion | PASS | `make test`; inventory 759/759 exact, 17 probe fingerprints == oracle, 759 CUDA allocs / 35,219,551,168 B, cleanup verified |
 | M1.2 CUDA primitives | PENDING | — |
 | M1.3 decoder block | PENDING | — |
 | M1.4 whole forward | PENDING | — |
@@ -47,14 +46,47 @@
   fails closed.
 - `make test` — 24/24 unit assertions pass (dtype, numel, manifest load,
   identical/mismatch compare, unknown profile, path-traversal rejection).
+- `./build/hidream --model dev --inventory --probe` — V0 host-only run:
+  expected=759 found=759 missing=0 unexpected=0; shape/dtype/numel mismatches 0;
+  total_bytes=35,219,551,168; largest=`lm_head.weight` (622,329,856).
+- Oracle cross-check of all 17 probe fingerprints via `.venv/bin/python` +
+  `safetensors.safe_open`: every SHA-256 matches the native reader byte-for-byte.
+- `./build/hidream --model dev --to-device` — 759 tracked `cudaMalloc` buffers,
+  device_bytes_allocated=35,219,551,168 == host_bytes_loaded, all freed (13.6 s).
+- `make test` — `tests/unit/test_weights.c` adds 77 assertions (index parse,
+  sorted table, inventory, oracle fingerprint table, device placement,
+  cleanup + repeat placement, Base profile intact). Total 101 assertions pass.
+- `.venv/bin/python tools/m1_guard.py check-locks` — `ok: true`, no problems.
 
 ## Commands failed
 
-- (none)
+- `make` initially failed compiling `src/model/weights.c` (`cudaDeviceProp` needs
+  the `struct` keyword when only `cuda_runtime_api.h` is visible in C mode).
+  Fixed with `struct cudaDeviceProp`; also removed an unused `dtype_size()` and
+  silenced the unused `model_dir` parameter.
+- First `--inventory --probe` run reported 755 missing / 755 unexpected: the
+  versioned manifest preserves discovery order, not name order, while the shard
+  index is name-sorted. `hd_weights_inventory` now sorts a pointer array over
+  the manifest before the merge. The manifest file itself is left untouched so
+  its M0 fingerprint stays valid.
 
 ## Unresolved issues
 
-- (none blocking preflight)
+- (none blocking)
+
+## M1.1 gate evidence
+
+| Gate condition | Result |
+|----------------|--------|
+| V0 PASS | `make test` 101 assertions, `--inventory` exit 0 |
+| 0 transformer forwards | no CUDA kernel launched; only `cudaMalloc`/`cudaMemcpy`/`cudaDeviceSynchronize` |
+| all expected Dev weights resolved | 759/759, missing=0 |
+| no unexpected tensor silently ignored | unexpected=0 |
+| raw values/fingerprints match source | 17/17 SHA-256 identical to `safetensors` oracle |
+| CUDA allocations succeed | 759 allocations, 35,219,551,168 B |
+| cleanup frees all owned resources | `hd_weight_store_free` then repeat placement reproduces identical accounting |
+| Base profile path remains supported | `hd_profile_load("base")` ok, path `models/base`, immutable revision |
+| host-only parser tests | `tests/unit/test_weights.c`
 
 ## Run budget (target)
 
