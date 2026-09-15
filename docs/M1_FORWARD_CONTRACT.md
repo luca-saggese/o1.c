@@ -179,14 +179,52 @@ Frozen pipeline (`build_t2i_text_sample`), batch 1:
 
 ```
 for step in timesteps:
-    x_pred = model_forward(state, timestep, conditioning)   # device
-    state  = scheduler_step(state, x_pred, timestep)        # device or host (M1.5)
+    x_pred = model_forward(state, model_timestep, conditioning)   # device
+    state  = scheduler_step(state, x_pred, scheduler_timestep)    # device or host (M1.5)
 ```
 
 - Scheduler is semantically separate; coefficients/step rules are **not** mixed
   into decoder-block CUDA code (`docs/M1_3A… §41`).
 - M1.5 implements `o1_scheduler_step()`; flash scheduler (28 steps, timesteps
   frozen in `config/startup_manifest_dev.json`).
+
+### 15.1 Timestep domain chain (binding, frozen oracle semantics)
+
+`o1_model_forward()` accepts the **model timestep** domain (PixelDiT time),
+NOT scheduler time. The unit conversion lives in the scheduler/control layer:
+
+```
+scheduler domain:    step_t        = 999            (manifest scheduler_timestep)
+        ↓
+sigma domain:        sigma         = 999/1000 = 0.999
+                                     (clamped to ≥ T_EPS = 0.001)
+        ↓
+model domain:        model_timestep = 1 - sigma ≈ 0.001
+                                     (what o1_model_forward receives)
+        ↓
+embedder input:      t_scaled      = model_timestep * 1000 ≈ 1.0
+                                     (hd_forward multiplies ×1000 internally;
+                                      TimestepEmbedder.forward does t*1000)
+```
+
+Steps: `step_t 999 → model_t ≈ 0.001 → embedder ≈ 1.0`; `987 → 0.013 → 13`;
+`974 → 0.026 → 26`. **Never** pass scheduler time (999) straight into
+`o1_model_forward`: that produced embedder input 999000 in M1.4 (wrong by ~6
+orders) and is the accepted root cause of the M1.4 timestep_conditioning
+divergence.
+
+`scheduler_step_t`, `sigma`, `model_timestep`, `timestep_embedder_input` are
+all persisted per captured step (M1.5 manifests) to remove the `timestep: 999`
+ambiguity.
+
+### 15.2 Masked-row x_pred contract
+
+`forward_once` returns **only the vinput-masked rows** of x_pred:
+`x_pred[0, token_types>0]` → shape `[1, IMG, 3072]` (4 image rows, not the
+full 23-row sequence). The scheduler's v_cond/guidance/`sched.step` arithmetic
+operates exclusively on these image rows. Native must slice rows 19..22 from
+the full `[23, 3072]` x_pred before any scheduler math, matching the
+`vinput_mask` (token_types binary, image tokens set).
 
 ## 16. CPU/GPU ownership map
 

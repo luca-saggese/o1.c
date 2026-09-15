@@ -2,9 +2,9 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.4 — native full-forward validation (PASS)
+- **Current sub-step:** M1.5 — scheduler oracle semantics + native integration (research phase complete, implementation pending)
 - **Last green gate:** M1.4 whole forward — `test_full_forward` 14/14 assertions PASS (block_last 0.0246, final_norm 0.0871, complete 0.1409 within drift-amplification envelope); tail machinery self-consistency exact (nrmse=0); drift prediction ratio 1.000/1.001
-- **Engine HEAD:** `0737c4a` (M1.4 gate commit pending)
+- **Engine HEAD:** `c4ce67f` (`feat(m1): complete native transformer forward path`)
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
@@ -12,7 +12,8 @@
 - **Oracle runs consumed (V2+):** 0
 - **Native runs consumed (V2+):** 0
 - **Known failures:** none (M1.4 residual fully explained as bf16 drift amplification, contract §6)
-- **Exact next action:** M1.5 — scheduler. Implement Dev/Base flash-scheduler `step()` and deterministic denoising state; validate V4 1-step, then 3-step once 1-step passes. Commit `feat(m1): match hidream scheduler and deterministic denoising state`.
+- **M1.5 critical finding (timestep domain):** the M1.4 golden's `timestep: 999` field is **scheduler time**, not model input. Frozen oracle converts `step_t=999 → sigma=999/1000=0.999 → model_timestep=1-sigma≈0.001 → embedding input=model_timestep×1000≈1.0`. The M1.4 native passed 999.0 directly to `hd_forward`, giving embedder input 999000 — wrong by ~6 orders. M1.5 must pass `model_timestep≈0.001` to `hd_forward` (which multiplies ×1000 internally). Manifest fields renamed: `scheduler_timestep`/`sigma`/`model_timestep`/`timestep_embedder_input`.
+- **Exact next action:** implement M1.5: capture script → run 1 three-step oracle capture (guidance_scale=1.0) → native `o1_scheduler_step()` → V4 1-step parity test → extend to 3 steps. Commit `feat(m1): match hidream scheduler and deterministic denoising state`.
 
 ## Gate status
 

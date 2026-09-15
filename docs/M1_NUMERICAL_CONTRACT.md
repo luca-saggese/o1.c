@@ -134,3 +134,29 @@ Amplification factors: final_norm ≈ 3.54× input, complete ≈ 5.73× input.
 These replace class D/E for the M1.4 whole-forward gate only. Class D/E remain
 the contract for single-block and primitive gates. The bounds are re-derived
 from the amplification curve whenever the block_last drift changes.
+
+## 7. M1.5 scheduler / deterministic denoising state (amendment)
+
+The oracle flash scheduler draws fresh noise **every step** with
+`generator=None` (device CUDA global RNG, seeded `seed+1` in the pipeline).
+This is impractical/incorrect to reproduce from C (CUDA-side RNG sequence).
+Therefore the M1.5 golden capture **freezes** the full noise path:
+
+- **Frozen per step:** pre-clamp noise tensor `[4, 3072]` fp32, `noise_std`
+  (fp32 scalar, `.std()` of the pre-clamp noise), `clip_val = noise_clip_std ×
+  noise_std` (manifest `noise_clip_std = 8.0`), post-clamp noise tensor, and
+  `s_noise` (`noise_scale_schedule[step_idx]`, 8.0 for all steps).
+- **Native M1.5 scheduler** consumes the frozen post-clamp noise tensor
+  verbatim: `z_next = sigma_next·noise·s_noise + (1−sigma_next)·denoised`,
+  `denoised = z − model_output·sigma`, all fp32; σ from manifest; `s_noise`
+  from manifest schedule. Determinism gate = native reuses golden noise bytes.
+- **V4 gate:** guidance_scale = 1.0 → single-sample path (`v_guided =
+  v_cond = (x_pred − z)/σ`; `model_output = −v_guided`); no `v_uncond` term.
+  The manifest has no guidance_scale field; 1.0 keeps the run budget at 3
+  forwards (reference for the guidance path if later needed is
+  `v_guided = v_uncond + g·(v_cond − v_uncond)` only when 2 samples).
+- Equivalence basis: scheduler arithmetic is class B (BF16/FP32 pointwise;
+  NRMSE ≤ 2e-3, cosine ≥ 0.99999, no NaN/Inf mismatch), but the frozen-noise
+  contract makes the M1.5 comparison **bit-structural on the noise tensor**
+  (class A), so x_pred → z_next chain divergence from the golden is entirely
+  attributable to native forward/embedding drift, never to RNG mismatch.
