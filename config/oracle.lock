@@ -1,0 +1,6 @@
+{
+  "upstream_url": "https://github.com/HiDream-ai/HiDream-O1-Image.git",
+  "upstream_branch": "dev",
+  "upstream_commit_sha": "3237a638a5c2c7be106b0175958f4c0db8c2dfbf",
+  "freeze_date": "2026-09-15T07:07:34Z"
+}
