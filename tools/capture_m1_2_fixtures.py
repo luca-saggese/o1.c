@@ -46,7 +46,8 @@ def run_guard():
 
 def bf16_bytes(t):
     """Raw little-endian bf16 bytes for a CUDA tensor."""
-    return t.to(torch.bfloat16).cpu().contiguous().numpy().tobytes()
+    t = t.to(torch.bfloat16).cpu().contiguous()
+    return t.view(torch.int16).numpy().astype("<u2").tobytes()
 
 
 def f32_bytes(t):
@@ -238,7 +239,7 @@ def main():
 
     # ---- timestep embedding ----
     t = torch.tensor([999], device=device)  # first scheduler timestep
-    t_emb = model.t_embedder1(t)            # [1,4096] bf16 (full mlp: silu included)
+    t_emb = model.model.t_embedder1(t)            # [1,4096] bf16 (full mlp: silu included)
     writer.add("t_emb_0", "timestep_embed", "B", [
         ("t", "int64", [1], i64_bytes(t)),
         ("out_t_emb", "bfloat16", t_emb.shape, bf16_bytes(t_emb)),
@@ -246,8 +247,8 @@ def main():
 
     # ---- gemm_t_emb_0: t_embedder1.mlp[0] Linear(256,4096) on the freq embedding ----
     # oracle: t_freq = self.timestep_embedding(t*1000, 256); t_emb = self.mlp[0](t_freq)
-    t_freq = model.t_embedder1.timestep_embedding(t * 1000, 256)  # [1,256] fp32
-    t_emb_lin = model.t_embedder1.mlp[0](t_freq.to(model.t_embedder1.mlp[0].weight.dtype))  # [1,4096]
+    t_freq = model.model.t_embedder1.timestep_embedding(t * 1000, 256)  # [1,256] fp32
+    t_emb_lin = model.model.t_embedder1.mlp[0](t_freq.to(model.model.t_embedder1.mlp[0].weight.dtype))  # [1,4096]
     writer.add("gemm_t_emb_0", "linear", "C", [
         ("x", "float32", [1, 256], f32_bytes(t_freq)),
         ("out_y", "bfloat16", t_emb_lin.shape, bf16_bytes(t_emb_lin)),
@@ -257,22 +258,22 @@ def main():
         "note": "pre-SiLU linear_1; freq input fp32 cast to w.dtype (bf16)"})
 
     # ---- x_embedder (patch embed) ----
-    x_emb = model.x_embedder(z)  # [1,4,4096] bf16
+    x_emb = model.model.x_embedder(z)  # [1,4,4096] bf16
     writer.add("x_embedder", "patch_embed", "B", [
         ("z", "bfloat16", z.shape, bf16_bytes(z)),
         ("out_x_emb", "bfloat16", x_emb.shape, bf16_bytes(x_emb)),
-    ], {"proj1": "model.x_embedder.proj1.weight", "proj2": "model.x_embedder.proj2.weight"})
+    ], {"proj1": "model.model.x_embedder.proj1.weight", "proj2": "model.model.x_embedder.proj2.weight"})
 
     # ---- final projection ----
     # NOTE contract 5.2 lists x [1,23,4096] -> [1,23,4096], but the oracle
     # FinalLayer.linear is Linear(4096, out_channels*PS^2) = (4096, 3072).
     # Captured oracle truth: [1,23,4096] -> [1,23,3072]. Documented deviation.
     x_final_in = torch.randn(1, S, H, device=device, dtype=dtype)
-    x_pred = model.final_layer2(x_final_in)  # [1,23,3072]
+    x_pred = model.model.final_layer2(x_final_in)  # [1,23,3072]
     writer.add("final_proj_0", "final_proj", "C", [
         ("x", "bfloat16", x_final_in.shape, bf16_bytes(x_final_in)),
         ("out_x_pred", "bfloat16", x_pred.shape, bf16_bytes(x_pred)),
-    ], {"weight": "model.final_layer2.linear.weight", "bias": "model.final_layer2.linear.bias",
+    ], {"weight": "model.model.final_layer2.linear.weight", "bias": "model.model.final_layer2.linear.bias",
         "weight_stored_shape": [3072, 4096], "transpose_w": True,
         "output_shape": [S, 3072], "compute_dtype": "bfloat16", "accum_dtype": "float32",
         "deviation": "contract said [1,23,4096]->[1,23,4096]; oracle is [1,23,4096]->[1,23,3072] (out=3*32*32)"})
@@ -349,13 +350,15 @@ def main():
     x_gemm = h_full[0]  # [23,4096] bf16
     attn0 = layer0.self_attn
 
-    def gemm(name, proj, wname, out_dim, wshape, tw):
-        y = proj(x_gemm)  # [23,out_dim]
+    def gemm(name, proj, wname, out_dim, wshape, tw, x_in=None):
+        if x_in is None:
+            x_in = x_gemm  # [23,4096]
+        y = proj(x_in)  # [23,out_dim]
         writer.add(name, "linear", "C", [
-            ("x", "bfloat16", x_gemm.shape, bf16_bytes(x_gemm)),
+            ("x", "bfloat16", x_in.shape, bf16_bytes(x_in)),
             ("out_y", "bfloat16", y.shape, bf16_bytes(y)),
         ], {"weight": wname, "weight_stored_shape": wshape, "transpose_w": tw,
-            "logical_input": [S, H], "output_shape": [S, out_dim],
+            "logical_input": list(x_in.shape), "output_shape": [S, out_dim],
             "compute_dtype": "bfloat16", "accum_dtype": "float32"})
 
     gemm("gemm_q_proj_0", attn0.q_proj, "model.language_model.layers.0.self_attn.q_proj.weight",
@@ -370,8 +373,9 @@ def main():
          I, [I, H], True)
     gemm("gemm_up_0", layer0.mlp.up_proj, "model.language_model.layers.0.mlp.up_proj.weight",
          I, [I, H], True)
+    x_down = torch.randn(1, S, I, device=device, dtype=dtype)  # [1,23,12288] (I in-features for down)
     gemm("gemm_down_0", layer0.mlp.down_proj, "model.language_model.layers.0.mlp.down_proj.weight",
-         H, [H, I], True)
+         H, [H, I], True, x_in=x_down[0])
 
     # oracle rotary.forward(x, position_ids) returns cos/sin of shape [bs, seq, head_dim]
     # = [1,23,128], cast to x.dtype (bf16 here). Contract 5.2 said [1,32,23,128] fp32;
@@ -444,11 +448,17 @@ def main():
     assert torch.isfinite(scores_seq).all(), "scores contain NaN/Inf"
     assert torch.isfinite(probs_seq).all(), "probs contain NaN/Inf"
     assert torch.isfinite(attn_out_seq).all(), "attn_out contains NaN/Inf"
-    # mask pattern: below/on diagonal 0.0, above -inf; gen rows all 0.0
+    # mask pattern: lower-tri+diag 0.0 (allowed), upper-tri -inf except gen rows (attend-all)
     m = attn_mask_4d[0, 0]
-    assert (m[torch.tril(torch.ones(S, S, dtype=torch.bool))] == 0.0).all()
-    assert (m[torch.triu(torch.ones(S, S, dtype=torch.bool), diagonal=1)] == min_val).all()
+    gen_bool = gen_positions  # [S] bool, CUDA
+    tri_low = torch.tril(torch.ones(S, S, dtype=torch.bool), diagonal=0).to(m.device)
+    strict_upper = torch.triu(torch.ones(S, S, dtype=torch.bool), diagonal=1).to(m.device)
+    non_gen_strict_upper = strict_upper & ~gen_bool.unsqueeze(1)  # strict-upper off gen rows
+    assert (m[tri_low] == 0.0).all()
+    assert (m[non_gen_strict_upper] == min_val).all()
     assert (m[gen_positions] == 0.0).all()
+    # gen rows attend to everything, so their strict-upper entries are 0.0 too
+    assert (m[gen_bool][strict_upper[gen_bool]] == 0.0).all()
     print("sanity checks OK")
 
     print(f"\nCaptured {len(writer.fixtures)} fixtures -> {GOLDEN_DIR}")
