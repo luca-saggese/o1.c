@@ -1,0 +1,11 @@
+{
+  "profile": "base",
+  "hf_repo": "HiDream-ai/HiDream-O1-Image",
+  "immutable_revision": "",
+  "local_path": "models/base",
+  "model_type": "full",
+  "num_inference_steps": 50,
+  "dtype": "float32",
+  "architectures": ["Qwen3VLForConditionalGeneration"],
+  "model_type_hf": "qwen3_vl"
+}

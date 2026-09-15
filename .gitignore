@@ -1,0 +1,31 @@
+# --- Upstream Python oracle (owned by upstream, never absorbed) ---
+/python/
+
+# --- Model weights ---
+/models/
+
+# --- Evidence / artifacts (git-ignored per working mode) ---
+/artifacts/
+
+# --- HF caches ---
+.cache/
+.cache/huggingface/
+~/.cache/huggingface/
+
+# --- Build output ---
+/build/
+*.o
+*.so
+*.a
+*.cu.o
+
+# --- Generated runtime data ---
+*.log
+*.tmp
+*.bin
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
