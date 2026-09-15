@@ -2,9 +2,9 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.0 (native profile/config/manifest loader)
-- **Last green gate:** M1 preflight (guardrails) at HEAD below
-- **Engine HEAD:** `c937fa6` (guardrails to be committed next)
+- **Current sub-step:** M1.1 (weight ingestion and deterministic buffers)
+- **Last green gate:** M1.0 (native profile/config/manifest loader)
+- **Engine HEAD:** `279316e` (M1.0 to be committed next)
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
@@ -20,7 +20,7 @@
 |------|--------|----------|
 | M0 (baseline) | PASS | `891ed61`; locks/manifests consistent |
 | M1 preflight (guardrails) | PASS | `tools/m1_guard.py` (`check-env`/`check-locks` green) |
-| M1.0 native loader | PENDING | — |
+| M1.0 native loader | PASS | `make test`; dev 759/759, param_count exact, base parses, unknown/missing fail closed |
 | M1.0 native loader | PENDING | — |
 | M1.1 weight ingestion | PENDING | — |
 | M1.2 CUDA primitives | PENDING | — |
@@ -42,6 +42,11 @@
   `step()` semantics differ.
 - Computed `flash` vs `flow_match` structural config offline (no model load):
   identical 28 timesteps / 29 sigmas.
+- `make clean && make` — built native loader (`build/hidream`).
+- `./build/hidream --model dev|base|foo` — verified dev/base parse, unknown
+  fails closed.
+- `make test` — 24/24 unit assertions pass (dtype, numel, manifest load,
+  identical/mismatch compare, unknown profile, path-traversal rejection).
 
 ## Commands failed
 
