@@ -17,13 +17,18 @@ TEST_BIN   := build/test_model_loader
 TEST_W_BIN := build/test_weights
 CUBIN      := build/obj/cuda
 CUDA_OBJS  := $(CUBIN)/support.o $(CUBIN)/norm.o $(CUBIN)/act.o \
-              $(CUBIN)/gemm.o $(CUBIN)/rope.o $(CUBIN)/attn.o
+              $(CUBIN)/gemm.o $(CUBIN)/rope.o $(CUBIN)/attn.o \
+              $(CUBIN)/residual.o
 TEST_P_BIN := build/test_primitives
 TEST_P_SRCS := tests/unit/test_primitives.c $(CORE_SRCS)
 TEST_P_OBJS := $(TEST_P_SRCS:.c=.o)
 TEST_TOK_BIN := build/test_tokenizer
 TEST_TOK_SRCS := tests/unit/test_tokenizer.c src/model/tokenizer.c src/model/model.c src/io/json.c
 TEST_TOK_OBJS := $(TEST_TOK_SRCS:.c=.o)
+
+TEST_BLOCK_BIN := build/test_block
+TEST_BLOCK_SRCS := tests/unit/test_block.c src/model/block.c $(CORE_SRCS) src/model/weights.c
+TEST_BLOCK_OBJS := $(TEST_BLOCK_SRCS:.c=.o)
 
 SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c
 OBJS      := $(SRCS:.c=.o)
@@ -35,13 +40,16 @@ TEST_W_OBJS := $(TEST_W_SRCS:.c=.o)
 
 all: $(BIN)
 
-test: $(TEST_BIN) $(TEST_W_BIN) $(TEST_P_BIN) $(TEST_TOK_BIN)
+test: $(TEST_BIN) $(TEST_W_BIN) $(TEST_P_BIN) $(TEST_TOK_BIN) $(TEST_BLOCK_BIN)
 	./$(TEST_BIN)
 	./$(TEST_W_BIN)
 	./$(TEST_P_BIN)
 	./$(TEST_TOK_BIN)
+	./$(TEST_BLOCK_BIN)
 
 test-primitives: $(TEST_P_BIN)
+
+test-block: $(TEST_BLOCK_BIN)
 
 test-tokenizer: $(TEST_TOK_BIN)
 	./$(TEST_TOK_BIN)
@@ -50,9 +58,9 @@ $(TEST_BIN): $(TEST_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_OBJS) -lm
 
-$(TEST_W_BIN): $(TEST_W_OBJS)
+$(TEST_W_BIN): $(TEST_W_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $(TEST_W_OBJS) $(CUDA_LDFLAGS) -lm
+	$(CC) $(CFLAGS) -o $@ $(TEST_W_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
 
 $(TEST_P_BIN): $(TEST_P_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
@@ -61,6 +69,10 @@ $(TEST_P_BIN): $(TEST_P_OBJS) $(CUDA_OBJS)
 $(TEST_TOK_BIN): $(TEST_TOK_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_TOK_OBJS) -lm
+
+$(TEST_BLOCK_BIN): $(TEST_BLOCK_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_BLOCK_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
 
 $(BIN): $(OBJS)
 	@mkdir -p $(dir $@)
@@ -78,4 +90,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-tokenizer clean
+.PHONY: all test test-primitives test-block test-tokenizer clean

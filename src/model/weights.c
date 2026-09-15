@@ -1,5 +1,6 @@
 #include "weights.h"
 #include "sha256.h"
+#include "cuda.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -296,15 +297,39 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
         st = hd_st_read_tensor(idx, t, host);
         if (st != HD_OK) { w_err("%s", hd_st_last_error()); goto fail; }
 
+        /* The engine computes in BF16 (M1_NUMERICAL_CONTRACT: "BF16 forward;
+         * weights loaded FP32"). Cast FP32 weights to BF16 on upload so the
+         * primitive ABI (which consumes BF16 dev buffers) sees the same
+         * values as the oracle's bf16-loaded weights. Non-FP32 tensors are
+         * uploaded as-is. */
+        int64_t dev_nbytes = t->nbytes;
+        if (t->dtype == HD_DTYPE_F32) {
+            dev_nbytes = t->numel * (int64_t)sizeof(uint16_t);
+        }
+
         void *dev = NULL;
-        e = cudaMalloc(&dev, (size_t)t->nbytes);
+        e = cudaMalloc(&dev, (size_t)dev_nbytes);
         if (e != cudaSuccess) {
-            w_err("cudaMalloc %lld bytes for %s: %s", (long long)t->nbytes,
+            w_err("cudaMalloc %lld bytes for %s: %s", (long long)dev_nbytes,
                   t->name, cudaGetErrorString(e));
             st = HD_ERR_OOM;
             goto fail;
         }
-        e = cudaMemcpy(dev, host, (size_t)t->nbytes, cudaMemcpyHostToDevice);
+        if (t->dtype == HD_DTYPE_F32) {
+            /* fp32 -> bf16 host-side cast, then upload */
+            uint8_t *cast = malloc((size_t)dev_nbytes);
+            if (!cast) {
+                w_err("oom bf16 cast buffer for %s", t->name);
+                cudaFree(dev);
+                st = HD_ERR_OOM;
+                goto fail;
+            }
+            hd_f32_buf_to_bf16((const float *)host, cast, (size_t)t->numel);
+            e = cudaMemcpy(dev, cast, (size_t)dev_nbytes, cudaMemcpyHostToDevice);
+            free(cast);
+        } else {
+            e = cudaMemcpy(dev, host, (size_t)t->nbytes, cudaMemcpyHostToDevice);
+        }
         if (e != cudaSuccess) {
             w_err("cudaMemcpy %s: %s", t->name, cudaGetErrorString(e));
             cudaFree(dev);
@@ -314,7 +339,7 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
 
         hd_device_alloc *a = &info.allocs[info.n_allocs];
         a->dev_ptr = dev;
-        a->nbytes = t->nbytes;
+        a->nbytes = dev_nbytes;
         snprintf(a->name, sizeof(a->name), "%s", t->name);
         info.n_allocs++;
         info.device_bytes_allocated += t->nbytes;

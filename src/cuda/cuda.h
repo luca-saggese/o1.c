@@ -63,6 +63,9 @@ void hd_silu(const void *x_dev, void *y_dev, size_t n);
 /* SwiGLU (class B): y = silu(gate) * up, bf16 elementwise. */
 void hd_swiglu(const void *gate_dev, const void *up_dev, void *y_dev, size_t n);
 
+/* Residual add (class B): y[i] = x[i] + a[i] elementwise, bf16. */
+void hd_residual_add(const void *x_dev, const void *a_dev, void *y_dev, size_t n);
+
 /*
  * Linear / GEMM (class C): y[M,N] = x[M,K] x W[K,N]^T with fp32 accumulation.
  * transpose_w == 1: W stored [N,K] (out,in) -> compute x^T . W^T.
