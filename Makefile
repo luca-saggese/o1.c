@@ -22,7 +22,7 @@ TEST_P_BIN := build/test_primitives
 TEST_P_SRCS := tests/unit/test_primitives.c $(CORE_SRCS)
 TEST_P_OBJS := $(TEST_P_SRCS:.c=.o)
 TEST_TOK_BIN := build/test_tokenizer
-TEST_TOK_SRCS := tests/unit/test_tokenizer.c src/model/tokenizer.c src/model/model.c
+TEST_TOK_SRCS := tests/unit/test_tokenizer.c src/model/tokenizer.c src/model/model.c src/io/json.c
 TEST_TOK_OBJS := $(TEST_TOK_SRCS:.c=.o)
 
 SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c
@@ -43,6 +43,9 @@ test: $(TEST_BIN) $(TEST_W_BIN) $(TEST_P_BIN) $(TEST_TOK_BIN)
 
 test-primitives: $(TEST_P_BIN)
 
+test-tokenizer: $(TEST_TOK_BIN)
+	./$(TEST_TOK_BIN)
+
 $(TEST_BIN): $(TEST_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_OBJS) -lm
@@ -54,6 +57,10 @@ $(TEST_W_BIN): $(TEST_W_OBJS)
 $(TEST_P_BIN): $(TEST_P_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_P_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
+
+$(TEST_TOK_BIN): $(TEST_TOK_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_TOK_OBJS) -lm
 
 $(BIN): $(OBJS)
 	@mkdir -p $(dir $@)
@@ -71,4 +78,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives clean
+.PHONY: all test test-primitives test-tokenizer clean
