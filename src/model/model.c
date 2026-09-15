@@ -11,6 +11,13 @@ static char g_error[512] = "";
 
 const char *hd_last_error(void) { return g_error; }
 
+void hd_set_error(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_error, sizeof(g_error), fmt, ap);
+    va_end(ap);
+}
+
 static void set_err(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

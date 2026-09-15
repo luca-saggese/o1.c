@@ -34,6 +34,9 @@ typedef enum {
 
 const char *hd_last_error(void);
 
+/* Sets the shared error string (used by sibling modules for hd_last_error). */
+void hd_set_error(const char *fmt, ...);
+
 /* ------------------------------------------------------------------ */
 /* Dtypes                                                              */
 /* ------------------------------------------------------------------ */
