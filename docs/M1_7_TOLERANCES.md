@@ -93,12 +93,14 @@ with the oracle formula `img = (z+1)/2` rearranged
 ```c
 /* native decode: z bf16[4,3072] -> uint8[64,64,3] */
 for tok in 0..3:  for c in 0..3:  for (p1,p2) in 0..32:
-    dst[p1*2+tok/2][p2*2+tok%2][c] =
+    dst[tok/2*32+p1][tok%2*32+p2][c] =
         clamp(round((bf16_to_f32(z[tok][c*1024+p1*32+p2]) + 1)/2 * 255), 0, 255)
 ```
 
 Note: `einops.rearrange` with `p1=32, p2=32` and `H=W=2` maps token `t` (0..3)
-to the spatial block `(t/2, t%2)`; channel `c` to `(C p1 p2)` stride `1024`.
+to the spatial block `(t/2, t%2)` (block offset `t/2*32`, `t%2*32`), inner
+offset `(p1,p2)`; channel `c` to `(C p1 p2)` stride `1024`. Verified against
+`einops.rearrange` (max diff 0.0).
 
 ### 4.1 Image metrics (golden decode vs native decode)
 
