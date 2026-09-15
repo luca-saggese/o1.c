@@ -39,25 +39,57 @@ typedef struct {
 } hd_block_internals;
 
 /*
+ * Pre-resolved device bindings for one decoder layer's weights. Resolved
+ * exactly ONCE during init/load (hd_block_resolve) so the forward hot path
+ * performs NO string-based tensor lookup. Query/projection/MLP/norm weights
+ * are all bias-free and bf16 device-resident.
+ */
+typedef struct {
+    int layer_idx;
+    const void *q_proj;   /* [H*D, hidden] bf16  self_attn.q_proj   */
+    const void *k_proj;   /* [KV*D, hidden] bf16 self_attn.k_proj   */
+    const void *v_proj;   /* [KV*D, hidden] bf16 self_attn.v_proj   */
+    const void *o_proj;   /* [hidden, H*D] bf16  self_attn.o_proj   */
+    const void *input_ln; /* [hidden] bf16       input_layernorm    */
+    const void *post_ln;  /* [hidden] bf16       post_attention_ln  */
+    const void *gate_proj;/* [ff_hidden, hidden] mlp.gate_proj      */
+    const void *up_proj;  /* [ff_hidden, hidden] mlp.up_proj        */
+    const void *down_proj;/* [hidden, ff_hidden] mlp.down_proj      */
+    const void *q_norm;   /* [head_dim] bf16     self_attn.q_norm   */
+    const void *k_norm;   /* [head_dim] bf16     self_attn.k_norm   */
+} hd_block_binding;
+
+/*
+ * Resolves a layer's 11 weights from the device store into `out` without
+ * allocating or copying. Caller keeps the returned binding alive as long as
+ * the store it references. Fails closed (HD_ERR_MISSING) if any required
+ * tensor name is absent.
+ */
+hd_status hd_block_resolve(const hd_weight_store *wstore, int layer_idx,
+                           hd_block_binding *out);
+
+/*
  * Forward one decoder block for `seq` tokens (batch 1).
  *
- *   in_dev  [seq, hidden] bf16 device input (block input x)
- *   pos_dev fp32 [3, seq] position_ids (int64 frozen position_ids cast to fp32)
- *   mask_dev bf16 [1,1,seq,seq] attention mask (0.0 / finfo(bf16).min)
- *   wstore  loaded device weights (see hd_weights_to_device); the layer's
- *           weights are resolved by frozen name.
- *   layer_idx which decoder layer's weights to use
- *   scratch  caller-provided buffer of >= hd_decoder_block_scratch_bytes()
- *   out_dev  [seq, hidden] bf16 device output (block output)
+ *   in_dev    [seq, hidden] bf16 device input (block input x)
+ *   pos_dev   fp32 [3, seq] position_ids (int64 frozen position_ids cast to
+ *             fp32)
+ *   mask_dev  bf16 [1,1,seq,seq] attention mask (0.0 / finfo(bf16).min)
+ *   bw        pre-resolved weight bindings (hd_block_resolve)
+ *   sec_dev   int64 [3] device-resident MRoPE section [24,20,20] (resident
+ *             across the whole forward; no HostToDevice copy in the block)
+ *   scratch   caller-provided buffer of >= hd_decoder_block_scratch_bytes()
+ *   out_dev   [seq, hidden] bf16 device output (block output)
  *
- * Whole-model forward is NOT performed; this drives only primitive module
- * calls. Returns HD_OK on success, HD_ERR_* otherwise and records a message
- * via hd_last_error(). `ints` is optional (may be NULL) and receives the
- * intermediate tensors listed in hd_block_internals.
+ * The forward is device-resident: no allocation, no host<->device transfer
+ * and no device synchronization occurs inside this function (all blocked by
+ * this function's caller). `ints` is optional (may be NULL) and receives the
+ * intermediate tensors listed in hd_block_internals via DeviceToDevice copy.
  */
 hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
                            const void *mask_dev,
-                           const hd_weight_store *wstore, int layer_idx,
+                           const hd_block_binding *bw,
+                           const int64_t *sec_dev,
                            void *scratch, int64_t scratch_bytes,
                            hd_block_internals *ints, void *out_dev,
                            int64_t seq, int heads, int kv_heads,

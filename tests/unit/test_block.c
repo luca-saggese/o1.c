@@ -230,6 +230,27 @@ int main(void) {
         return 1;
     }
 
+    /* ---- resolve this layer's weights once (no lookup in hot path) ---- */
+    hd_block_binding bw;
+    st = hd_block_resolve(&store, layer, &bw);
+    if (st != HD_OK) {
+        printf("FAIL: hd_block_resolve: %s\n", hd_last_error());
+        dev_free(xd); dev_free(posd); dev_free(maskd); dev_free(scratch);
+        hd_weight_store_free(&store); hd_json_free(meta); free(bin);
+        return 1;
+    }
+
+    /* ---- MRoPE section bound once, device-resident for the forward ---- */
+    int64_t sec_host[3] = {24, 20, 20};
+    void *secd = dev_alloc(sizeof(sec_host));
+    if (!secd) {
+        printf("FAIL: section device allocation failed\n");
+        dev_free(xd); dev_free(posd); dev_free(maskd); dev_free(scratch);
+        hd_weight_store_free(&store); hd_json_free(meta); free(bin);
+        return 1;
+    }
+    cudaMemcpy(secd, sec_host, sizeof(sec_host), cudaMemcpyHostToDevice);
+
     /* ---- outputs: block out + internals ---- */
     void *outd = dev_alloc(hid_bytes);
     void *ln0d = dev_alloc(hid_bytes);
@@ -241,7 +262,7 @@ int main(void) {
     hd_block_internals ints = { ln0d, ahd, ard, postd, mlpd };
 
     printf("  running hd_decoder_block ...\n");
-    st = hd_decoder_block(xd, (const float *)posd, maskd, &store, layer,
+    st = hd_decoder_block(xd, (const float *)posd, maskd, &bw, (const int64_t *)secd,
                           scratch, need, &ints, outd,
                           seq, NH, NKV, H, I, HD);
     CHECK(st == HD_OK, "hd_decoder_block ran without error");
@@ -285,6 +306,7 @@ int main(void) {
     /* ---- cleanup ---- */
     free(oh); free(cand);
     dev_free(xd); dev_free(posd); dev_free(maskd); dev_free(scratch);
+    dev_free(secd);
     dev_free(outd); dev_free(ln0d); dev_free(ahd); dev_free(ard);
     dev_free(postd); dev_free(mlpd);
     hd_weight_store_free(&store);

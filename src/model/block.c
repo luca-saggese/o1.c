@@ -45,26 +45,54 @@
 #include <cuda_runtime.h>
 
 /* ------------------------------------------------------------------ */
-/* Weight resolution                                                   */
+/* Bindings (resolved once at init; never looked up in the hot path)   */
 /* ------------------------------------------------------------------ */
 
-static const void *weight_ptr(const hd_weight_store *ws, const char *name) {
-    if (!ws) return NULL;
+static const void *resolve_one(const hd_weight_store *ws, const char *name) {
     for (int64_t i = 0; i < ws->n_allocs; i++) {
-        if (ws->allocs[i].name[0] && strcmp(ws->allocs[i].name, name) == 0)
+        if (ws->allocs[i].name[0] &&
+            strcmp(ws->allocs[i].name, name) == 0)
             return ws->allocs[i].dev_ptr;
     }
     return NULL;
 }
 
-static hd_status require_weight(const hd_weight_store *ws, const char *name,
-                                const void **out) {
-    const void *p = weight_ptr(ws, name);
-    if (!p) {
-        hd_set_error("block: missing weight %s", name);
+hd_status hd_block_resolve(const hd_weight_store *wstore, int layer_idx,
+                           hd_block_binding *out) {
+    if (!wstore || !out) {
+        hd_set_error("block: null argument in resolve");
         return HD_ERR_MISSING;
     }
-    *out = p;
+    char name[256];
+    const char *slot[11] = {
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+        "input_layernorm.weight",
+        "post_attention_layernorm.weight",
+        "mlp.gate_proj.weight",
+        "mlp.up_proj.weight",
+        "mlp.down_proj.weight",
+        "self_attn.q_norm.weight",
+        "self_attn.k_norm.weight",
+    };
+    const void *p[11];
+    for (int i = 0; i < 11; i++) {
+        snprintf(name, sizeof(name),
+                 "model.language_model.layers.%d.%s", layer_idx, slot[i]);
+        p[i] = resolve_one(wstore, name);
+        if (!p[i]) {
+            hd_set_error("block: missing weight %s", name);
+            return HD_ERR_MISSING;
+        }
+    }
+    out->layer_idx = layer_idx;
+    out->q_proj = p[0]; out->k_proj = p[1]; out->v_proj = p[2];
+    out->o_proj = p[3];
+    out->input_ln = p[4]; out->post_ln = p[5];
+    out->gate_proj = p[6]; out->up_proj = p[7]; out->down_proj = p[8];
+    out->q_norm = p[9]; out->k_norm = p[10];
     return HD_OK;
 }
 
@@ -110,12 +138,14 @@ int64_t hd_decoder_block_scratch_bytes(int64_t seq, int heads, int kv_heads,
 
 hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
                            const void *mask_dev,
-                           const hd_weight_store *wstore, int layer_idx,
+                           const hd_block_binding *bw,
+                           const int64_t *sec_dev,
                            void *scratch, int64_t scratch_bytes,
                            hd_block_internals *ints, void *out_dev,
                            int64_t seq, int heads, int kv_heads,
                            int hidden, int ff_hidden, int head_dim) {
-    if (!in_dev || !pos_dev || !mask_dev || !wstore || !scratch || !out_dev) {
+    if (!in_dev || !pos_dev || !mask_dev || !bw ||
+        !sec_dev || !scratch || !out_dev) {
         hd_set_error("block: null argument");
         return HD_ERR_MISSING;
     }
@@ -126,35 +156,13 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
         return HD_ERR_OOM;
     }
 
-    /* ------------------------------------------------------------ */
-    /* Resolve this layer's weights (by frozen name; all bias-free). */
-    /* ------------------------------------------------------------ */
-    const void *W[11];
-    const char *slot[11] = {
-        "self_attn.q_proj.weight",
-        "self_attn.k_proj.weight",
-        "self_attn.v_proj.weight",
-        "self_attn.o_proj.weight",
-        "input_layernorm.weight",
-        "post_attention_layernorm.weight",
-        "mlp.gate_proj.weight",
-        "mlp.up_proj.weight",
-        "mlp.down_proj.weight",
-        "self_attn.q_norm.weight",
-        "self_attn.k_norm.weight",
-    };
-    char name[256];
-    hd_status st;
-    for (int i = 0; i < 11; i++) {
-        snprintf(name, sizeof(name),
-                 "model.language_model.layers.%d.%s", layer_idx, slot[i]);
-        st = require_weight(wstore, name, &W[i]);
-        if (st != HD_OK) return st;
-    }
-    const void *w_q = W[0], *w_k = W[1], *w_v = W[2], *w_o = W[3];
-    const void *w_in = W[4], *w_post = W[5];
-    const void *w_g = W[6], *w_u = W[7], *w_d = W[8];
-    const void *w_qn = W[9], *w_kn = W[10];
+    /* Bindings were resolved once at init (hd_block_resolve); the forward
+     * hot path performs no string-based tensor lookup. */
+    const void *w_q = bw->q_proj, *w_k = bw->k_proj, *w_v = bw->v_proj;
+    const void *w_o = bw->o_proj;
+    const void *w_in = bw->input_ln, *w_post = bw->post_ln;
+    const void *w_g = bw->gate_proj, *w_u = bw->up_proj, *w_d = bw->down_proj;
+    const void *w_qn = bw->q_norm, *w_kn = bw->k_norm;
 
     /* ------------------------------------------------------------ */
     /* Carve scratch pointers. Offsets tracked in bf16 element units. */
@@ -165,27 +173,27 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     int64_t S_I = seq * ff_hidden;
     int64_t S_HID = seq * hidden;
 
-    int64_t e = 0;
-    int64_t o_ln   = e; e += S_HID;
-    int64_t o_qp   = e; e += S_H;
-    int64_t o_q    = e; e += S_H;
-    int64_t o_qr   = e; e += S_H;
-    int64_t o_kp   = e; e += S_K;
-    int64_t o_k    = e; e += S_K;
-    int64_t o_kr   = e; e += S_K;
-    int64_t o_vp   = e; e += S_K;
-    int64_t o_v    = e; e += S_K;
-    int64_t o_sco  = e; e += S_S;
-    int64_t o_prb  = e; e += S_S;
-    int64_t o_as   = e; e += S_H;
-    int64_t o_ah   = e; e += S_HID;
-    int64_t o_ar   = e; e += S_HID;
-    int64_t o_post = e; e += S_HID;
-    int64_t o_gate = e; e += S_I;
-    int64_t o_up   = e; e += S_I;
-    int64_t o_swi  = e; e += S_I;
-    int64_t o_mlp  = e; e += S_HID;
-    int64_t o_mlpr = e; e += S_HID;
+    int64_t cur = 0;
+    int64_t o_ln   = cur; cur += S_HID;
+    int64_t o_qp   = cur; cur += S_H;
+    int64_t o_q    = cur; cur += S_H;
+    int64_t o_qr   = cur; cur += S_H;
+    int64_t o_kp   = cur; cur += S_K;
+    int64_t o_k    = cur; cur += S_K;
+    int64_t o_kr   = cur; cur += S_K;
+    int64_t o_vp   = cur; cur += S_K;
+    int64_t o_v    = cur; cur += S_K;
+    int64_t o_sco  = cur; cur += S_S;
+    int64_t o_prb  = cur; cur += S_S;
+    int64_t o_as   = cur; cur += S_H;
+    int64_t o_ah   = cur; cur += S_HID;
+    int64_t o_ar   = cur; cur += S_HID;
+    int64_t o_post = cur; cur += S_HID;
+    int64_t o_gate = cur; cur += S_I;
+    int64_t o_up   = cur; cur += S_I;
+    int64_t o_swi  = cur; cur += S_I;
+    int64_t o_mlp  = cur; cur += S_HID;
+    int64_t o_mlpr = cur; cur += S_HID;
 
     uint8_t *b = scratch;
     size_t off(size_t ee) { return ee * sizeof(uint16_t); }
@@ -210,10 +218,9 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     void *mlp    = b + off((size_t)o_mlp);
     void *mlpr   = b + off((size_t)o_mlpr);
 
-    size_t bf16_bytes = off((size_t)e);
+    size_t bf16_bytes = off((size_t)cur);
     float *cosf = (float *)(b + bf16_bytes);
     float *sinf = cosf + seq * head_dim;
-    int64_t *sec = (int64_t *)(sinf + seq * head_dim);
 
     /* ------------------------------------------------------------------ */
     /* Hyper-parameter constants (from config/dev.json + oracle)           */
@@ -248,18 +255,10 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     hd_rmsnorm(q, w_qn, qr, S * H, D, eps);
     hd_rmsnorm(k, w_kn, kr, S * KV, D, eps);
 
-    /* 5. MRoPE cos/sin (fp32), section [24,20,20] interleaved         */
-    {
-        int64_t section[3] = {24, 20, 20};
-        cudaMemcpy(sec, section, sizeof(section), cudaMemcpyHostToDevice);
-        cudaError_t e = cudaGetLastError();
-        if (e != cudaSuccess) {
-            hd_set_error("block: sec copy %s", cudaGetErrorString(e));
-            return HD_ERR_IO;
-        }
-    }
-    /* input shape [3, 1, seq] fp32; batch=1. */
-    hd_mrope_cos_sin(pos_dev, 1, S, sec, 3, D, theta, attn_scaling,
+    /* 5. MRoPE cos/sin (fp32), section [24,20,20] interleaved. The section
+     *    array is already device-resident (sec_dev, bound once at init);
+     *    no HostToDevice transfer happens inside the forward.            */
+    hd_mrope_cos_sin(pos_dev, 1, S, sec_dev, 3, D, theta, attn_scaling,
                      1, cosf, sinf);
 
     /* 6. apply rotary to q/k (head-major)                            */
@@ -295,20 +294,17 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     /* 12. residual: mlpr = attn_r + mlp                              */
     hd_residual_add(ar, mlp, mlpr, (size_t)S_HID);
 
-    /* copy result to caller output                                    */
-    {
-        cudaError_t e = cudaMemcpy(out_dev, mlpr, (size_t)S_HID * 2,
-                                   cudaMemcpyDeviceToDevice);
-        e = cudaDeviceSynchronize();
-        if (e != cudaSuccess) {
-            hd_set_error("block: final sync %s", cudaGetErrorString(e));
-            return HD_ERR_IO;
-        }
+    /* copy result to caller output (device-to-device, async; the caller /
+     * orchestrator owns synchronization — no sync inside the block)     */
+    cudaError_t e = cudaMemcpy(out_dev, mlpr, (size_t)S_HID * 2,
+                               cudaMemcpyDeviceToDevice);
+    if (e != cudaSuccess) {
+        hd_set_error("block: final copy %s", cudaGetErrorString(e));
+        return HD_ERR_IO;
     }
 
     /* optional internal-tensor export (validation harness)             */
     if (ints) {
-        cudaError_t e = cudaSuccess;
         if (ints->ln0)
             e = cudaMemcpy(ints->ln0, ln, (size_t)S_HID * 2,
                            cudaMemcpyDeviceToDevice);
