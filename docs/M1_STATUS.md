@@ -4,7 +4,7 @@
 
 - **Current sub-step:** M1.1 (weight ingestion and deterministic buffers)
 - **Last green gate:** M1.0 (native profile/config/manifest loader)
-- **Engine HEAD:** `279316e` (M1.0 to be committed next)
+- **Engine HEAD:** `c71c311`
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — `not_downloaded`
