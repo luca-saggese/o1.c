@@ -435,6 +435,35 @@ hd_status hd_tokenizer_build_template(const char *prompt, char **out) {
     return HD_OK;
 }
 
+/*
+ * Builds the ref-mode im-chat template: K <|vision_start|><|image_pad|>
+ * <|vision_end|> placeholders followed by the caption, then the assistant
+ * generation prompt. Matches the oracle's apply_chat_template for
+ * content=[{"type":"image"}]*K + [{"type":"text","text":caption}].
+ */
+hd_status hd_tokenizer_build_ref_template(const char *caption, int k,
+                                          char **out) {
+    *out = NULL;
+    if (!caption || k < 0) { hd_set_error("tokenizer: bad ref template args"); return HD_ERR_PARSE; }
+    static const char pre[] = "<|im_start|>user\n";
+    static const char post[] = "<|im_end|>\n<|im_start|>assistant\n";
+    static const char img[] = "<|vision_start|><|image_pad|><|vision_end|>";
+    size_t nl = strlen(caption);
+    size_t total = sizeof(pre) - 1 + (size_t)k * (sizeof(img) - 1) + nl + sizeof(post) - 1;
+    char *buf = malloc(total + 1);
+    if (!buf) { hd_set_error("tokenizer oom (ref template)"); return HD_ERR_OOM; }
+    size_t off = 0;
+    memcpy(buf + off, pre, sizeof(pre) - 1); off += sizeof(pre) - 1;
+    for (int i = 0; i < k; i++) {
+        memcpy(buf + off, img, sizeof(img) - 1); off += sizeof(img) - 1;
+    }
+    memcpy(buf + off, caption, nl); off += nl;
+    memcpy(buf + off, post, sizeof(post) - 1); off += sizeof(post) - 1;
+    buf[total] = '\0';
+    *out = buf;
+    return HD_OK;
+}
+
 hd_status hd_tokenizer_encode_prompt(const char *prompt, int **out_ids, size_t *out_count) {
     char *tpl = NULL;
     hd_status st = hd_tokenizer_build_template(prompt, &tpl);

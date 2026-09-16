@@ -57,6 +57,16 @@ hd_status hd_tokenizer_encode_prompt(const char *prompt,
 hd_status hd_tokenizer_build_template(const char *prompt, char **out);
 
 /*
+ * Builds the ref-mode im-chat template: K <|vision_start|><|image_pad|>
+ * <|vision_end|> placeholders followed by the caption, then the assistant
+ * generation prompt (oracle apply_chat_template for
+ * content=[{"type":"image"}]*K + [{"type":"text","text":caption}]).
+ * Caller frees *out with free().
+ */
+hd_status hd_tokenizer_build_ref_template(const char *caption, int k,
+                                          char **out);
+
+/*
  * Encodes an arbitrary pre-built template/string with the frozen byte-level
  * BPE and special-token handling (add_special_tokens=False semantics).
  * Caller frees *out_ids with hd_tokenizer_free_ids.

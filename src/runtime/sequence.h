@@ -36,6 +36,15 @@ extern "C" {
 
 #define HD_SEQ_MAX_REFS 8
 
+/* Per-reference geometry for hd_seq_build (oracle pipeline.py ref path). */
+typedef struct {
+    int tokens;   /* ref_image_lens: token count = grid_h*grid_w (resized) */
+    int grid_h;   /* resized ref grid height in patches (rh/PATCH) */
+    int grid_w;   /* resized ref grid width  in patches (rw/PATCH) */
+    int cond_h;   /* VLM cond grid height in patches (after spatial_merge) */
+    int cond_w;   /* VLM cond grid width  in patches (after spatial_merge) */
+} hd_ref_geom;
+
 typedef struct {
     int64_t *input_ids;       /* [text_len] int64  (malloc'd) */
     float *pos_f32;           /* [3,1,S] float32   (malloc'd) */
@@ -81,13 +90,19 @@ hd_status hd_seq_t2i(const int64_t *input_ids, int text_len,
  * skeleton). References append vision-token blocks (token_types 2),
  * skip_vision_start_token = [0]*K + [1] for target. The target image always
  * follows the text/tms block (token_types 1).
+ *
+ * `refs` carries per-reference geometry: tokens (resized ref token count),
+ * grid_h/grid_w (resized ref grid in patches) and cond_h/cond_w (VLM cond
+ * grid after spatial_merge). The first K vision-start tokens (in the
+ * template) use the cond grid; the target uses height/width grid; the K
+ * vision-block refs use grid_h/grid_w.
  */
 hd_status hd_seq_build(const hd_generation_request *req, int patch_size,
                        int image_token_id, int video_token_id,
                        int vision_start_token_id, int tms_token_id,
                        int timestep_token_num, int spatial_merge_size,
                        int fix_point, int height, int width,
-                       const int *ref_lens, hd_sequence *out);
+                       const hd_ref_geom *refs, hd_sequence *out);
 
 /* Free all arrays owned by `out` (from hd_seq_t2i / hd_seq_build). */
 void hd_sequence_free(hd_sequence *s);

@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "request.h"
+#include "tokenizer.h"
 
 /* bf16 min value (0xFF7F pattern -> -3.3895314e+38) */
 #define BF16_MIN_BITS 0xFF7Fu
@@ -167,29 +168,271 @@ hd_status hd_seq_build(const hd_generation_request *req, int patch_size,
                        int vision_start_token_id, int tms_token_id,
                        int timestep_token_num, int spatial_merge_size,
                        int fix_point, int height, int width,
-                       const int *ref_lens, hd_sequence *out) {
+                       const hd_ref_geom *refs, hd_sequence *out) {
     if (!req || !out) {
         hd_set_error("sequence: null request");
         return HD_ERR_MISSING;
     }
-    /*
-     * Reference-bearing modes require the reference pixel pipeline (native
-     * image decode + resize + pixel_unshuffle) and the template with
-     * <image> placeholders. The T2I path (hd_seq_t2i) is fully implemented;
-     * ref modes are staged behind the native image pipeline (M1-post.3).
-     */
-    if (req->reference_count > 0) {
-        hd_set_error("sequence: ref modes staged behind native image "
-                     "pipeline (M1-post.3); use hd_seq_t2i for T2I");
+    memset(out, 0, sizeof(*out));
+
+    int K = req->reference_count;
+    if (K < 0 || K > HD_SEQ_MAX_REFS) {
+        hd_set_error("sequence: ref count out of range");
         return HD_ERR_MISSING;
     }
-    (void)image_token_id; (void)video_token_id; (void)vision_start_token_id;
-    (void)tms_token_id; (void)timestep_token_num; (void)spatial_merge_size;
-    (void)fix_point; (void)ref_lens;
-    return hd_seq_t2i(NULL, 0, height, width, patch_size,
-                      image_token_id, video_token_id, vision_start_token_id,
-                      tms_token_id, timestep_token_num, spatial_merge_size,
-                      fix_point, out);
+    if (K > 0 && !refs) {
+        hd_set_error("sequence: refs geometry required");
+        return HD_ERR_MISSING;
+    }
+    if (height <= 0 || width <= 0 || patch_size <= 0) {
+        hd_set_error("sequence: bad dims");
+        return HD_ERR_MISSING;
+    }
+
+    int grid_h = height / patch_size;
+    int grid_w = width / patch_size;
+    int image_len = grid_h * grid_w;   /* target image token count */
+
+    /* --- tokenize the ref-mode template --- */
+    /* <|im_start|>user\n + K*(<|vision_start|><|image_pad|><|vision_end|>)
+       + caption + <|im_end|>\n<|im_start|>assistant\n */
+    char *tpl = NULL;
+    hd_status st = hd_tokenizer_build_ref_template(req->prompt, K, &tpl);
+    if (st != HD_OK) return st;
+    int *tpl_ids = NULL;
+    size_t tpl_n = 0;
+    st = hd_tokenizer_encode(tpl, &tpl_ids, &tpl_n);
+    free(tpl);
+    if (st != HD_OK) return st;
+
+    /*
+     * Expand each template image placeholder to its VLM cond grid
+     * (cond_h*cond_w image_pad tokens), exactly like the oracle processor
+     * (`proc(text=[tpl], images=cond_pils, ...)` replaces the single
+     * <|image_pad|> per <|image|> with cond_h*cond_w pads). The template
+     * string carries one placeholder pad per reference; the tokenized
+     * sequence must carry the full cond grid.
+     */
+    size_t exp_n = tpl_n;
+    for (int i = 0; i < K; i++) {
+        if (refs[i].cond_h <= 0 || refs[i].cond_w <= 0) {
+            hd_set_error("sequence: bad ref cond grid");
+            hd_tokenizer_free_ids(tpl_ids);
+            return HD_ERR_MISSING;
+        }
+        exp_n += (size_t)refs[i].cond_h * refs[i].cond_w - 1;
+    }
+    int *exp_ids = xmalloc(exp_n * sizeof(int));
+    if (!exp_ids) { hd_tokenizer_free_ids(tpl_ids); return HD_ERR_OOM; }
+    size_t eo = 0;
+    int ri = 0;
+    for (size_t i = 0; i < tpl_n; i++) {
+        if (tpl_ids[i] == vision_start_token_id && i + 1 < tpl_n &&
+            tpl_ids[i + 1] == image_token_id) {
+            exp_ids[eo++] = vision_start_token_id;
+            int n = refs[ri].cond_h * refs[ri].cond_w;
+            for (int j = 0; j < n; j++) exp_ids[eo++] = image_token_id;
+            ri++;
+            i++;                       /* skip the single placeholder pad */
+        } else {
+            exp_ids[eo++] = tpl_ids[i];
+        }
+    }
+    hd_tokenizer_free_ids(tpl_ids);
+    if (ri != K) {
+        hd_set_error("sequence: expanded %d/%d ref placeholders", ri, K);
+        free(exp_ids);
+        return HD_ERR_MISSING;
+    }
+    tpl_ids = exp_ids;
+    tpl_n = eo;
+
+    /* --- append boi + tms*N --- */
+    int text_len = (int)tpl_n + 1 + timestep_token_num;
+    int64_t *ids = xmalloc((size_t)text_len * sizeof(int64_t));
+    if (!ids) { hd_tokenizer_free_ids(tpl_ids); return HD_ERR_OOM; }
+    for (int i = 0; i < (int)tpl_n; i++) ids[i] = tpl_ids[i];
+    hd_tokenizer_free_ids(tpl_ids);
+    ids[tpl_n] = 151669;                       /* <|boi_token|> */
+    for (int i = 0; i < timestep_token_num; i++)
+        ids[tpl_n + 1 + i] = tms_token_id;
+
+    /* --- vision tokens: tgt first, then refs --- */
+    int ref_total = 0;
+    for (int i = 0; i < K; i++) {
+        if (refs[i].tokens <= 0) {
+            hd_set_error("sequence: bad ref token count");
+            free(ids); return HD_ERR_MISSING;
+        }
+        ref_total += refs[i].tokens;
+    }
+    int S = text_len + image_len + ref_total;
+    int64_t *all_ids = xmalloc((size_t)S * sizeof(int64_t));
+    if (!all_ids) { free(ids); return HD_ERR_OOM; }
+    memcpy(all_ids, ids, (size_t)text_len * sizeof(int64_t));
+    free(ids);
+
+    int off = text_len;
+    /* target block: vision_start + (image_len-1)*image_pad */
+    all_ids[off++] = vision_start_token_id;
+    for (int i = 1; i < image_len; i++) all_ids[off++] = image_token_id;
+    /* reference blocks */
+    for (int r = 0; r < K; r++) {
+        all_ids[off++] = vision_start_token_id;
+        for (int i = 1; i < refs[r].tokens; i++) all_ids[off++] = image_token_id;
+    }
+
+    /*
+     * --- position_ids [3,1,S] ---
+     * get_rope_index_fix_point with skip_vision_start_token =
+     * [0]*K + [1] + [1]*K. Vision blocks in input_ids order:
+     *   v=0..K-1  refs in template (skip 0): text continuous, grid at
+     *             text_len+st_idx (cond grid)
+     *   v=K       tgt (skip 1): text continuous, grid at fix_point
+     *   v=K+1..2K refs in vision blocks (skip 1): grid at st_idx
+     * st_idx = max(assigned positions)+1 before each block (oracle).
+     */
+    float *pos = xmalloc(3u * (size_t)S * sizeof(float));
+    if (!pos) { free(all_ids); return HD_ERR_OOM; }
+
+    /* Vision-start positions in input_ids order. */
+    int vs_pos[1 + 2 * HD_SEQ_MAX_REFS];
+    int vs_n = 0;
+    for (int i = 0; i < S; i++)
+        if (all_ids[i] == vision_start_token_id) vs_pos[vs_n++] = i;
+    /* Expect 2K+1 vision starts (K template + tgt + K vision blocks). */
+    if (vs_n != 2 * K + 1) {
+        hd_set_error("sequence: vision-start count mismatch");
+        free(all_ids); free(pos); return HD_ERR_MISSING;
+    }
+
+    int max_pos = -1;
+    int fp = fix_point;
+    int st_pos = 0;
+    int n_blocks = 2 * K + 1;
+    for (int v = 0; v < n_blocks; v++) {
+        int ed = vs_pos[v] + 1;          /* first image_pad after vision_start */
+        int skip = (v < K) ? 0 : 1;
+        int tlen = ed - st_pos;
+        if (skip) tlen -= 1;
+        if (tlen < 0) tlen = 0;
+        int st_idx = (max_pos >= 0) ? max_pos + 1 : 0;
+        for (int i = 0; i < tlen; i++) {
+            pos[0 * S + st_pos + i] = (float)(st_idx + i);
+            pos[1 * S + st_pos + i] = (float)(st_idx + i);
+            pos[2 * S + st_pos + i] = (float)(st_idx + i);
+        }
+        max_pos = st_idx + tlen - 1;
+
+        int gh, gw, gt = 1;
+        if (v < K) { gh = refs[v].cond_h; gw = refs[v].cond_w; }
+        else if (v == K) { gh = grid_h; gw = grid_w; }
+        else { int r = v - K - 1; gh = refs[r].grid_h; gw = refs[r].grid_w; }
+        if (gh <= 0 || gw <= 0) {
+            hd_set_error("sequence: bad ref grid");
+            free(all_ids); free(pos); return HD_ERR_MISSING;
+        }
+        int vlen = gt * gh * gw;
+        int base;
+        if (skip) {
+            if (fp > 0) fp = fp - st_idx;
+            base = fp + st_idx;
+            fp = 0;
+        } else {
+            base = tlen + st_idx;
+        }
+        for (int t = 0; t < gt; t++)
+            for (int h = 0; h < gh; h++)
+                for (int w = 0; w < gw; w++) {
+                    int idx = st_pos + tlen + t * gh * gw + h * gw + w;
+                    pos[0 * S + idx] = (float)(base + t);
+                    pos[1 * S + idx] = (float)(base + h);
+                    pos[2 * S + idx] = (float)(base + w);
+                }
+        int gmax = base + (gt - 1 > gh - 1 ? (gt - 1 > gw - 1 ? gt - 1 : gw - 1)
+                                           : (gh - 1 > gw - 1 ? gh - 1 : gw - 1));
+        if (gmax > max_pos) max_pos = gmax;
+        /*
+         * The block occupies [st_pos, st_pos + tlen + vlen): text region
+         * first, then the vision grid (which for skip=1 blocks includes the
+         * vision_start token). The oracle's internal `st = ed + grid` cursor
+         * is off by one for skip=1 blocks; the concatenation semantics give
+         * the exact end as st_pos + tlen + vlen.
+         */
+        st_pos += tlen + vlen;
+    }
+    /* trailing text (none in ref modes: vision blocks end the sequence) */
+    if (st_pos < S) {
+        int tlen = S - st_pos;
+        int st_idx = max_pos + 1;
+        for (int i = 0; i < tlen; i++) {
+            pos[0 * S + st_pos + i] = (float)(st_idx + i);
+            pos[1 * S + st_pos + i] = (float)(st_idx + i);
+            pos[2 * S + st_pos + i] = (float)(st_idx + i);
+        }
+    }
+
+    /*
+     * --- attention mask [1,1,S,S] bf16 ---
+     * causal triu min above diagonal; token rows (types 1,2,3) zeroed.
+     * token_types: 1 on tgt rows, 2 on ref rows, 3 on tms rows.
+     */
+    unsigned char *mask = xmalloc((size_t)S * (size_t)S * 2);
+    if (!mask) { free(all_ids); free(pos); return HD_ERR_OOM; }
+    unsigned char *types = xmalloc((size_t)S);
+    if (!types) { free(all_ids); free(pos); free(mask); return HD_ERR_OOM; }
+    for (int i = 0; i < S; i++) types[i] = 0;
+    /* tms rows: [tpl_n+1, text_len) */
+    for (int i = (int)tpl_n + 1; i < text_len; i++) types[i] = 3;
+    /* tgt rows: [text_len, text_len+image_len) */
+    for (int i = text_len; i < text_len + image_len; i++) types[i] = 1;
+    /* ref rows */
+    int roff = text_len + image_len;
+    for (int r = 0; r < K; r++) {
+        for (int i = 0; i < refs[r].tokens; i++) types[roff + i] = 2;
+        roff += refs[r].tokens;
+    }
+    for (int r = 0; r < S; r++) {
+        int is_token_row = (types[r] != 0);
+        for (int c = 0; c < S; c++) {
+            uint16_t bits;
+            if (is_token_row) {
+                bits = 0x0000u;
+            } else if (c > r) {
+                bits = BF16_MIN_BITS;
+            } else {
+                bits = 0x0000u;
+            }
+            size_t off = ((size_t)r * S + c) * 2;
+            mask[off] = (unsigned char)(bits & 0xFF);
+            mask[off + 1] = (unsigned char)(bits >> 8);
+        }
+    }
+
+    /* --- vinput_mask [S]: image rows (types 1 or 2) --- */
+    unsigned char *vmask = xmalloc((size_t)S);
+    if (!vmask) { free(all_ids); free(pos); free(mask); free(types); return HD_ERR_OOM; }
+    for (int i = 0; i < S; i++)
+        vmask[i] = (types[i] == 1 || types[i] == 2) ? 1 : 0;
+    free(types);
+
+    out->input_ids = all_ids;
+    out->pos_f32 = pos;
+    out->mask_bf16 = mask;
+    out->vinput_mask = vmask;
+    out->sec[0] = 24; out->sec[1] = 20; out->sec[2] = 20;
+    out->text_len = text_len;
+    out->image_len = image_len;
+    out->img_begin = text_len;
+    out->S = S;
+    out->n_refs = K;
+    int acc = text_len + image_len;
+    for (int r = 0; r < K; r++) {
+        out->ref_len[r] = refs[r].tokens;
+        out->ref_begin[r] = acc;
+        acc += refs[r].tokens;
+    }
+    return HD_OK;
 }
 
 void hd_sequence_free(hd_sequence *s) {

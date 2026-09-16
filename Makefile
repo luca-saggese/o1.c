@@ -133,6 +133,16 @@ $(TEST_SEQ_BIN): $(TEST_SEQ_OBJS)
 test-seq: $(TEST_SEQ_BIN)
 	./$(TEST_SEQ_BIN)
 
+TEST_SEQREF_BIN := build/test_seq_ref
+TEST_SEQREF_SRCS := tests/unit/test_seq_ref.c src/runtime/sequence.c src/runtime/request.c src/model/tokenizer.c $(CORE_SRCS)
+TEST_SEQREF_OBJS := $(TEST_SEQREF_SRCS:.c=.o)
+$(TEST_SEQREF_BIN): $(TEST_SEQREF_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SEQREF_OBJS) -lm
+
+test-seq-ref: $(TEST_SEQREF_BIN)
+	./$(TEST_SEQREF_BIN)
+
 TEST_DECODE_BIN := build/test_decode
 TEST_DECODE_SRCS := tests/unit/test_decode.c src/runtime/decode.c
 TEST_DECODE_OBJS := $(TEST_DECODE_SRCS:.c=.o)
