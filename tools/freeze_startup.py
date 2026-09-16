@@ -144,22 +144,36 @@ def _tokenizer_freeze(processor, model_config) -> dict:
     }
 
 
-def _scheduler_freeze(model_config, dtype: str = "float32") -> dict:
+def _scheduler_freeze(model_config, profile_cfg: dict, dtype: str = "float32") -> dict:
     import torch  # noqa: F401
     from models.pipeline import DEFAULT_TIMESTEPS, build_scheduler
 
-    # Dev T2I (non-editing) uses the "flash" stochastic flow-match scheduler.
-    # Structural config only — no denoising step. Editing (single ref image)
-    # uses "flow_match"; the full model uses "default" (FlowUniPC). Structural
-    # timesteps/sigmas are identical between "flash" and "flow_match" for Dev
-    # (same DEFAULT_TIMESTEPS, shift=1.0); only step() semantics differ.
-    num_steps = 28
-    shift = 1.0
+    # Scheduler selection mirrors python/inference.py, keyed off the profile's
+    # model_type ("full" -> Base 50-step FlowUniPC default; "dev" -> Dev T2I
+    # 28-step flash). Structural freeze only — no denoising step is run.
+    profile = profile_cfg.get("profile")
+    model_type = profile_cfg.get("model_type", "dev")
+    if model_type == "full":
+        num_steps = int(profile_cfg.get("num_inference_steps", 50))
+        shift = 3.0
+        scheduler_name = "default"
+        timesteps_list = None
+    else:
+        # Dev T2I (non-editing) uses the "flash" stochastic flow-match
+        # scheduler. Editing (single ref image) uses "flow_match". Structural
+        # timesteps/sigmas are identical between "flash" and "flow_match" for
+        # Dev (same DEFAULT_TIMESTEPS, shift=1.0); only step() semantics
+        # differ. Defaults below match python/inference.py for model_type dev.
+        num_steps = int(profile_cfg.get("num_inference_steps", 28))
+        shift = float(profile_cfg.get("scheduler_shift", 1.0))
+        scheduler_name = profile_cfg.get("scheduler_name", "flash")
+        timesteps_list = list(DEFAULT_TIMESTEPS)
     device = "cpu"
-    sched = build_scheduler(num_steps, list(DEFAULT_TIMESTEPS), shift, device, "flash")
+    sched = build_scheduler(num_steps, timesteps_list, shift, device, scheduler_name)
 
     return {
-        "scheduler_name": "flash",
+        "profile": profile,
+        "scheduler_name": scheduler_name,
         "num_inference_steps": num_steps,
         "shift": shift,
         "timesteps": [int(t) for t in sched.timesteps.tolist()],
@@ -224,7 +238,7 @@ def freeze_startup(root: str, profile: str, local_path: str, profile_cfg: dict) 
     out["tensor_fingerprint"] = _tensor_fingerprint(model)
     out["model_config"] = model_config.to_dict()
     out["tokenizer"] = _tokenizer_freeze(processor, model_config)
-    out["scheduler"] = _scheduler_freeze(model_config)
+    out["scheduler"] = _scheduler_freeze(model_config, profile_cfg)
     out["load_seconds"] = round(time.time() - t0, 2)
 
     out_dir = Path(root) / "artifacts" / "m0" / "startup"

@@ -129,7 +129,7 @@
       "hf_repo": "HiDream-ai/HiDream-O1-Image",
       "immutable_revision": "0b0901d99f200389e138c61946af1185f5f49a13",
       "local_path": "models/base",
-      "download_status": "not_downloaded",
+      "download_status": "downloaded",
       "config_filenames": [
         "config.json",
         "configuration.json",
@@ -140,6 +140,112 @@
         "preprocessor_config.json",
         "tokenizer_config.json",
         "video_preprocessor_config.json"
+      ],
+      "files": [
+        {
+          "name": ".gitattributes",
+          "size": 1797
+        },
+        {
+          "name": ".mdl",
+          "size": 48
+        },
+        {
+          "name": ".msc",
+          "size": 1237
+        },
+        {
+          "name": ".mv",
+          "size": 36
+        },
+        {
+          "name": "README.md",
+          "size": 23917
+        },
+        {
+          "name": "chat_template.json",
+          "size": 5499,
+          "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
+        },
+        {
+          "name": "config.json",
+          "size": 1474,
+          "sha256": "5cd452860dc1e9c29dd71cc3cef7f39b338b7a40793f7a260655c2d3568f3661"
+        },
+        {
+          "name": "configuration.json",
+          "size": 73,
+          "sha256": "f888421726665e8a84b738eed42a64875aed79de8be7daade851ac8bf4c0cef9"
+        },
+        {
+          "name": "generation_config.json",
+          "size": 269,
+          "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+        },
+        {
+          "name": "merges.txt",
+          "size": 1671839
+        },
+        {
+          "name": "model-00001-of-00008.safetensors",
+          "size": 4962686568
+        },
+        {
+          "name": "model-00002-of-00008.safetensors",
+          "size": 4832049608
+        },
+        {
+          "name": "model-00003-of-00008.safetensors",
+          "size": 4832049624
+        },
+        {
+          "name": "model-00004-of-00008.safetensors",
+          "size": 4999856656
+        },
+        {
+          "name": "model-00005-of-00008.safetensors",
+          "size": 4832049680
+        },
+        {
+          "name": "model-00006-of-00008.safetensors",
+          "size": 4832049672
+        },
+        {
+          "name": "model-00007-of-00008.safetensors",
+          "size": 3439582192
+        },
+        {
+          "name": "model-00008-of-00008.safetensors",
+          "size": 2489319552
+        },
+        {
+          "name": "model.safetensors.index.json",
+          "size": 68454,
+          "sha256": "33865f9d84679a850080795107f049c3fac81c78d343322f66a36163b9ab53c9"
+        },
+        {
+          "name": "preprocessor_config.json",
+          "size": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+        },
+        {
+          "name": "tokenizer.json",
+          "size": 7033338
+        },
+        {
+          "name": "tokenizer_config.json",
+          "size": 10973,
+          "sha256": "23941c0283a942b4711c381a3b73689680b8dddc338f28fdb49fcfcd548ced2a"
+        },
+        {
+          "name": "video_preprocessor_config.json",
+          "size": 385,
+          "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+        },
+        {
+          "name": "vocab.json",
+          "size": 2776833
+        }
       ]
     }
   }
