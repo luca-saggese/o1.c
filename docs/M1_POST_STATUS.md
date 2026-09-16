@@ -1,7 +1,7 @@
 # M1-post Status
 
 ## Current sub-step
-M1-post COMPLETE — all M1-post.1→.12 workstreams closed. Final 28-step Dev 1024² generation executed and validated.
+M1-post.1 — production native T2I path (request ABI + sequence builder + 1024² fixture + native runner + final 28-step Dev generation all done). **M1-post NOT complete**: M1-post.2→.12 still open (see taskboard).
 
 ## Last completed gate
 Final 28-step Dev 1024² generation (seed 123456, teapot prompt): `artifacts/m1/final_sanity/dev_native_seed123456.{png,json,log}` — 28/28 steps, no NaN/Inf, final z range [-1.1797, 1.2578], PNG 1024×1024 RGB written, 5/5 assertions PASS. Engine commit at generation time: 13be974.
@@ -47,4 +47,4 @@ Final 28-step Dev 1024² generation (seed 123456, teapot prompt): `artifacts/m1/
 4. Native tokenizer (297-token subset) cannot encode the teapot prompt → 1024² sequence fixture from oracle pure functions (fixture `/tmp/sanity_seq` complete, all 15 checks PASS).
 
 ## Next action
-None — M1-post COMPLETE. Hand off to M2 candidates (see docs/M2_CANDIDATES.md).
+M1-post.2 — long prompts and visual text rendering (see M1_POST_FULL_FEATURE_PARITY.md §14-16). Then M1-post.3→.12 in order. Full scope: M1_POST_FULL_FEATURE_PARITY.md.
