@@ -2,9 +2,9 @@
 
 <!-- Maintain continuously. Must always show the fields below. -->
 
-- **Current sub-step:** M1.7 — M1 closure: full Dev inference (V5) + Base compatibility
-- **Last green gate:** M1.7 Base compatibility — `test_m1_7_base` 15/16 assertions PASS; single marginal failure `block_mid` NRMSE=0.010551 vs Class D 1e-2 (5.5% over). **Disposition (proven, Class D NOT loosened):** decisive local-layer-18 test `test_m1_7_base_local` — E_local_18 = 9.25e-5 (golden layer-17 → native block 18 → vs golden layer-18) ⇒ layer 18 internally CORRECT. First-half drift profile (native 0→k vs golden, from exact golden step-5 input): layer0=0.00368, 4=0.00456, 8=0.02, 12=0.01999, 16=0.010551, 17=0.010552, 18=0.010551 — the 0.010551 error is already present at layer 16 and merely passes through block 18. Accumulated upstream BF16 drift, not a layer-18 defect. New all-blocks fixture `M1_V3_BASE_BLOCKS_0` (sha `85b28c4a…`) bit-identical to `M1_V3_BASE_FORWARD_0` at layers 0/18/35 (nrmse=0). Commit pending.
-- **Engine HEAD:** `3212e3d` (`test(m1): add base one-forward compatibility gate machinery`)
+- **Current sub-step:** M1 closed — final report committed
+- **Last green gate:** M1.7 Base compatibility — `test_m1_7_base` 15/16 assertions PASS; single marginal failure `block_mid` NRMSE=0.010551 vs Class D 1e-2 (5.5% over). **Disposition (proven, Class D NOT loosened):** decisive local-layer-18 test `test_m1_7_base_local` — E_local_18 = 9.25e-5 (golden layer-17 → native block 18 → vs golden layer-18) ⇒ layer 18 internally CORRECT. First-half drift profile (native 0→k vs golden, from exact golden step-5 input): layer0=0.00368, 4=0.00456, 8=0.02, 12=0.01999, 16=0.010551, 17=0.010552, 18=0.010551 — the 0.010551 error is already present at layer 16 and merely passes through block 18. Accumulated upstream BF16 drift, not a layer-18 defect. New all-blocks fixture `M1_V3_BASE_BLOCKS_0` (sha `85b28c4a…`) bit-identical to `M1_V3_BASE_FORWARD_0` at layers 0/18/35 (nrmse=0). Committed `c5613b6`, pushed.
+- **Engine HEAD:** `c5613b6` (`test(m1): validate base one-forward compatibility against frozen oracle`)
 - **Oracle SHA:** `3237a638a5c2c7be106b0175958f4c0db8c2dfbf`
 - **Dev model revision:** `b6acc2fe452b3120430620dc4354fa442ee081ea`
 - **Base model revision / download status:** `0b0901d99f200389e138c61946af1185f5f49a13` — downloaded, frozen, gate run
@@ -13,7 +13,7 @@
 - **Native runs consumed (V2+):** 3 (M1.7 V5 28-step replay `test_m1_7_dev`; M1.7 Base gate `test_m1_7_base`; M1.7 Base local-layer-18 `test_m1_7_base_local`)
 - **Known failures:** none (M1.4 residual fully explained as bf16 drift amplification, contract §6; M1.7 Base block_mid 0.010551 explained as accumulated upstream drift via E_local_18=9.25e-5)
 - **M1.5 critical finding (timestep domain):** the M1.4 golden's `timestep: 999` field is **scheduler time**, not model input. Frozen oracle converts `step_t=999 → sigma=999/1000=0.999 → model_timestep=1-sigma≈0.001 → embedding input=model_timestep×1000≈1.0`. The M1.4 native passed 999.0 directly to `hd_forward`, giving embedder input 999000 — wrong by ~6 orders. M1.5 must pass `model_timestep≈0.001` to `hd_forward` (which multiplies ×1000 internally). Manifest fields renamed: `scheduler_timestep`/`sigma`/`model_timestep`/`timestep_embedder_input`.
-- **Exact next action:** commit M1.7 Base closure (capture script, local test, Makefile target, status doc) and push; then close M1 (final status + report).
+- **Exact next action:** M2.0 — fair Python-vs-native benchmark harness (see `docs/M1_REPORT.md` handoff).
 
 ## Gate status
 
