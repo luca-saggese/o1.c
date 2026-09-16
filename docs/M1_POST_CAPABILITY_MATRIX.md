@@ -14,8 +14,8 @@ Source of truth: frozen oracle at `/python` (commit `3237a638…c2dfbf`).
 | Single-ref aspect-preserving edit | ✅ | ✅ | ✅ | `keep_original_aspect`, max_size 2048 |
 | Multi-ref personalization | ✅ | ✅ | ✅ | >= 2 refs, ordered concat |
 | Layout conditioning | ✅ | ✅ | ✅ | bbox canvas appended as image |
-| Skeleton / pose conditioning | ⚠️ | ⚠️ | ⚠️ | **NOT in audited source** — see blockers |
-| Storyboard | ⚠️ | ⚠️ | ⚠️ | **NOT in audited source** — see blockers |
+| Skeleton / pose conditioning | ⚠️ | ⚠️ | ⚠️ | **SUPPORTED_BY_UPSTREAM / IMPLEMENTATION_REQUIRED** — see blockers |
+| Storyboard | ⚠️ | ⚠️ | ⚠️ | **ADVERTISED_CAPABILITY / SEMANTICS_NOT_YET_ESTABLISHED** — see blockers |
 | High-res (2048) | ✅ | ✅ | ✅ | PREDEFINED_RESOLUTIONS incl. 2048² |
 | Aspect ratios | ✅ | ✅ | ✅ | `find_closest_resolution` snapping |
 | CFG / guidance | ✅ (5.0) | ✅ (0.0) | ✅ | blank " " uncond prompt |
@@ -38,7 +38,26 @@ Source of truth: frozen oracle at `/python` (commit `3237a638…c2dfbf`).
 
 ## Blockers / unknown semantics (must not be assumed)
 
-1. **Skeleton conditioning**: no OpenPose/keypoint parser exists in the audited Python sources. The advertised "skeleton conditioning" is not executable from the frozen oracle → mark UNSUPPORTED unless upstream source elsewhere defines it.
-2. **Storyboard**: no multi-panel decomposition exists in the audited sources. Generation accepts one prompt + optional refs → mark UNSUPPORTED unless upstream defines it.
+1. **Skeleton conditioning** — **SUPPORTED_BY_UPSTREAM / IMPLEMENTATION_REQUIRED**.
+   The official upstream `main` declares that the IP pipeline supports skeleton
+   conditioning and ships an official example *Multi-Reference Subject-Driven
+   Personalization with Skeleton* using `face`, `background`, `openpose`, and
+   `part references` through the normal `--ref_images` path. The absence of the
+   literal word "skeleton" in the model files is not evidence of absence of the
+   feature: it is a semantics carried by the generic multi-reference path
+   (ordered refs + optional bbox text). Implementation must audit the real
+   `ref_images -> preprocessing -> sequence` path and determine whether
+   face/bg/openpose/parts are differentiated by order, metadata, filename, or
+   content only. Native engine: route skeleton refs through the same
+   `hd_seq_build` multi-ref path (K refs, ordered), with the skeleton image
+   preprocessed like any other reference (max_size per K, CONDITION_IMAGE_SIZE
+   384 LANCZOS, spatial_merge 2).
+2. **Storyboard** — **ADVERTISED_CAPABILITY / SEMANTICS_NOT_YET_ESTABLISHED**.
+   The official README advertises storyboard as a model feature, but no
+   dedicated API/pipeline has been found in the frozen oracle yet. Continue the
+   audit in README, technical report, `assets/examples`, and the
+   prompt-agent/web workflow before deciding how to implement it. Do not close
+   a capability as unsupported merely because no flag/string with that name
+   exists in the model code.
 3. **Per-step noise RNG**: per-step noise uses diffusers `randn_tensor` with no explicit generator → CUDA default RNG (Philox). Native stand-in: CPU MT19937 port (documented, deterministic).
 4. **Reference role tags**: no subject/style/type role labels; only ordered refs + optional bbox text.
