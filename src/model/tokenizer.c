@@ -26,11 +26,15 @@
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-/* Linear search in the (id-sorted) vocab subset for a piece string. */
+/* Binary search in the (piece-sorted) full vocab for a piece string. */
 static int vocab_lookup(const char *piece) {
-    for (int i = 0; i < HD_TOK_VOCAB_COUNT; i++) {
-        if (strcmp(hd_tok_vocab_str[i], piece) == 0)
-            return hd_tok_vocab_id[i];
+    int lo = 0, hi = hd_tok_vocab_count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = strcmp(hd_tok_vocab_str[mid], piece);
+        if (c == 0) return hd_tok_vocab_id[mid];
+        if (c < 0) lo = mid + 1;
+        else hi = mid - 1;
     }
     return -1;
 }
@@ -101,6 +105,7 @@ static size_t atom_plen(const char *pat, size_t plen, size_t p) {
 static long atom_match(const hd_mctx *m, size_t pos, const char *pat, size_t p) {
     if (pos >= m->len) return -1;
     unsigned cp; utf8_next(m->text + pos, &cp);
+    size_t plen = strlen(pat);
     if (pat[p] == '\\') {
         char e = pat[p + 1];
         if (e == 's') return cp_is_ws(cp) ? (long)utf8_next(m->text + pos, &cp) : -1;
@@ -113,6 +118,17 @@ static long atom_match(const hd_mctx *m, size_t pos, const char *pat, size_t p) 
         if (pat[i] == '^') { neg = 1; i++; }
         int in_class = 0;
         while (pat[i] != ']') {
+            if (pat[i] == '\\' && i + 1 < plen) {
+                char e = pat[i + 1];
+                if (e == 's') { if (cp_is_ws(cp)) in_class = 1; }
+                else if (e == 'S') { if (!cp_is_ws(cp)) in_class = 1; }
+                else if (e == 'd') { if (cp_is_digit(cp)) in_class = 1; }
+                else if (e == 'D') { if (!cp_is_digit(cp)) in_class = 1; }
+                else if (e == 'w') { if (cp_is_alpha(cp) || cp_is_digit(cp) || cp == '_') in_class = 1; }
+                else if (e == 'W') { if (!(cp_is_alpha(cp) || cp_is_digit(cp) || cp == '_')) in_class = 1; }
+                i += 2;
+                continue;
+            }
             char lo = pat[i];
             if (pat[i + 1] == '-' && pat[i + 2] != ']' &&
                 pat[i + 2] && pat[i + 2] != ']') {
@@ -215,11 +231,16 @@ static void pieces_clear(hd_pieces *p) {
     free(p->owned);
 }
 
+/* Binary search in the (left,right)-sorted merge table. */
 static int merge_rank_of(const char *l, const char *r) {
-    for (int i = 0; i < hd_tok_merge_count; i++) {
-        if (strcmp(hd_tok_merge_left[i], l) == 0 &&
-            strcmp(hd_tok_merge_right[i], r) == 0)
-            return hd_tok_merge_rank[i];
+    int lo = 0, hi = hd_tok_merge_count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = strcmp(hd_tok_merge_left[mid], l);
+        if (c == 0) c = strcmp(hd_tok_merge_right[mid], r);
+        if (c == 0) return hd_tok_merge_rank[mid];
+        if (c < 0) lo = mid + 1;
+        else hi = mid - 1;
     }
     return -1;
 }

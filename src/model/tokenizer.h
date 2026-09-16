@@ -26,8 +26,6 @@
 /* Embedded tables for the frozen tokenizer vocab / merges. */
 #include "tokenizer_tables.h"
 
-#define HD_TOK_VOCAB_COUNT 297
-
 /* Frozen tokenizer identity. */
 #define HD_TOK_IDENTITY "Qwen2Tokenizer (GPT-2 byte-level BPE)"
 

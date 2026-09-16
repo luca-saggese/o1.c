@@ -108,6 +108,41 @@ static void test_template_builder(void) {
     }
 }
 
+static void test_teapot_full_vocab(void) {
+    /* M1-post gate: full-vocab encode of the release-sanity prompt must be
+       bit-exact with the frozen oracle (transformers AutoTokenizer on
+       models/dev, apply_chat_template + encode(add_special_tokens=False)). */
+    static const char *PROMPT =
+        "A red ceramic teapot on a wooden table, next to a yellow lemon and a "
+        "blue ceramic cup. Soft natural window light from the left, realistic "
+        "photography, shallow depth of field, clean background, high detail.";
+    static const int FROZEN[51] = {
+        151644, 872, 198, 32, 2518, 42024, 1013, 89901, 389, 264, 22360, 1965,
+        11, 1790, 311, 264, 13753, 29464, 323, 264, 6303, 42024, 10525, 13,
+        24079, 5810, 3241, 3100, 504, 279, 2115, 11, 25489, 23751, 11, 25600,
+        7990, 315, 2070, 11, 4240, 4004, 11, 1550, 7716, 13, 151645, 198,
+        151644, 77091, 198
+    };
+    int *ids = NULL; size_t cnt = 0;
+    hd_status st = hd_tokenizer_encode_prompt(PROMPT, &ids, &cnt);
+    CHECK(st == HD_OK, "teapot prompt encode returns HD_OK");
+    if (st != HD_OK) { printf("  err: %s\n", hd_last_error()); return; }
+    CHECK(cnt == 51, "teapot prompt -> 51 ids");
+    if (cnt != 51) {
+        printf("  got %zu ids, want 51\n", cnt);
+        goto check_free;
+    }
+    for (size_t i = 0; i < 51; i++) {
+        if (ids[i] != FROZEN[i]) {
+            failures++;
+            printf("FAIL: teapot token %zu: got %d, want %d\n", i, ids[i], FROZEN[i]);
+        }
+    }
+    if (failures == 0) printf("ok: teapot prompt maps to frozen oracle ids exactly\n");
+check_free:
+    hd_tokenizer_free_ids(ids);
+}
+
 int main(void) {
     printf("tokenizer identity: %s\n", HD_TOK_IDENTITY);
     printf("special tokens: im_start=%d im_end=%d vision_start=%d vision_end=%d "
@@ -119,6 +154,7 @@ int main(void) {
     test_special_tokens();
     test_template_builder();
     test_canonical();
+    test_teapot_full_vocab();
     test_determinism();
     test_empty_prompt();
 
