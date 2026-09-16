@@ -1,0 +1,83 @@
+#ifndef HD_IMAGE_H
+#define HD_IMAGE_H
+
+/*
+ * M1-post native image pipeline (contract section 54).
+ *
+ * Parity target: python/models/utils.py (resize_pilimage, calculate_dimensions,
+ * keep_original_aspect) + pipeline.py TENSOR_TRANSFORM + pixel_unshuffle.
+ *
+ * All pixel buffers are float32 RGB in [0,1], row-major [3*H*W] (R plane,
+ * G plane, B plane). No Python, no PIL, no network.
+ */
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "hidream.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    int width;                 /* decoded pixel width  */
+    int height;                /* decoded pixel height */
+    float *rgb;                /* [3*width*height] float32 in [0,1] */
+} hd_image;
+
+/*
+ * Decode PNG or JPEG from path into RGB float [0,1].
+ * Applies EXIF orientation (oracle Image.open().convert("RGB") semantics).
+ * Returns HD_ERR_MISSING on unsupported format / decode failure.
+ */
+hd_status hd_image_load(const char *path, hd_image *out);
+
+/*
+ * Oracle resize_pilimage parity (python/models/utils.py):
+ *   while min(w,h) >= 2*image_size: halve with BOX resample
+ *   S_max = image_size^2; scale = sqrt(S_max / (w*h))
+ *   try 4 candidate sizes (round/floor combos, patch-aligned),
+ *   pick largest with area <= S_max, then resize + center-crop.
+ *   resampler = BICUBIC (oracle default).
+ * Returns HD_ERR_MISSING if src is NULL or image_size < patch_size.
+ */
+hd_status hd_image_resize(const hd_image *src, int image_size, int patch_size,
+                          hd_image *out);
+
+/*
+ * Oracle calculate_dimensions parity (python/models/utils.py):
+ *   width  = sqrt(max_size^2 * ratio)   (ratio = aspect_w/aspect_h)
+ *   height = width / ratio
+ *   both dims snapped down to multiples of 32 (oracle hardcodes 32).
+ * NOTE: oracle snaps to 32, not patch_size; keep patch_size param for
+ * callers that need a different alignment, but default callers pass 32.
+ */
+void hd_image_calc_dims(int max_size, float aspect_w, float aspect_h,
+                        int patch_size, int *out_w, int *out_h);
+
+/*
+ * Oracle pixel_unshuffle parity (einops rearrange):
+ *   "C (H p1) (W p2) -> (H W) (C p1 p2)"
+ * patches_out must hold grid_h*grid_w * 3*patch_size*patch_size floats.
+ * grid_h = height/patch_size, grid_w = width/patch_size.
+ */
+hd_status hd_image_to_patches(const hd_image *img, int patch_size,
+                              float *patches_out);
+
+/*
+ * Oracle keep_original_aspect parity (python/models/pipeline.py):
+ *   resize the single reference to max_size=2048 (patch-aligned) and use
+ *   its resulting size as the target output dims. Returns the snapped
+ *   output dims (already patch-aligned by resize_pilimage).
+ */
+void hd_image_keep_aspect(const hd_image *ref, int req_w, int req_h,
+                          int patch_size, int *out_w, int *out_h);
+
+void hd_image_free(hd_image *img);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* HD_IMAGE_H */

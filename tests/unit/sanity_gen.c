@@ -277,6 +277,11 @@ int main(int argc, char **argv) {
     /* ---- 28-step chain ---- */
     float *noise_step = malloc(nimg * sizeof(float));
     if (!noise_step) { printf("FAIL: oom noise_step\n"); return 1; }
+    /* Oracle noise semantics (pipeline.py): torch.manual_seed(seed+1) once,
+     * then each step's randn_like(z) is drawn IN SEQUENCE from the single
+     * global generator. There is NO per-step reseeding. */
+    hd_torch_rng step_rng;
+    hd_torch_rng_seed(&step_rng, seed + 1);
     for (int i = 0; i < steps; i++) {
         /* model_timestep = 1 - step_t/1000 (pipeline.py) */
         float t_pixeldit = 1.0f - sched.sigmas[i] * 1000.0f / 1000.0f;
@@ -297,11 +302,9 @@ int main(int argc, char **argv) {
         /* v_cond = (xp - z)/sigma; model_output = -v_guided (no CFG) */
         hd_sched_vcond(z_prev_dev, xp_dev, sigma, mo_dev, (int)nimg);
 
-        /* per-step noise: torch.randn_like(z) via native RNG (documented
-         * fidelity choice: CPU MT19937 stand-in for CUDA Philox) */
-        hd_torch_rng rng;
-        hd_torch_rng_seed(&rng, seed + 1 + (uint64_t)(i + 1) * 1000003ULL);
-        hd_torch_randn_f32(&rng, noise_step, (int64_t)nimg);
+        /* per-step noise: drawn sequentially from the single generator
+         * seeded seed+1 (matches the frozen oracle exactly) */
+        hd_torch_randn_f32(&step_rng, noise_step, (int64_t)nimg);
         cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
 
         st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev, S_NOISE,

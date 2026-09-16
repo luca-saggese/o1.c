@@ -3,7 +3,7 @@
 CC      ?= gcc
 NVCC    ?= nvcc
 CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra
-CPPFLAGS += -Iinclude -Isrc/io -Isrc/model -Isrc/cuda -Isrc/runtime
+CPPFLAGS += -Iinclude -Isrc/io -Isrc/model -Isrc/cuda -Isrc/runtime -Isrc/image
 
 CUDA_HOME  ?= /usr/local/cuda
 CUDA_CPPFLAGS := -I$(CUDA_HOME)/include
@@ -42,7 +42,11 @@ TEST_M15_BIN := build/test_m1_5_scheduler
 TEST_M15_SRCS := tests/unit/test_m1_5_scheduler.c src/model/block.c src/model/forward.c src/model/scheduler.c $(CORE_SRCS) src/model/weights.c
 TEST_M15_OBJS := $(TEST_M15_SRCS:.c=.o)
 
-SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c src/model/forward.c
+SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c \
+             src/model/forward.c src/model/scheduler.c src/model/tokenizer.c \
+             src/runtime/sequence.c src/runtime/request.c src/runtime/decode.c \
+             src/runtime/torch_rng.c src/runtime/generate.c src/io/png_wrap.c \
+             src/image/hd_image.c src/image/layout.c
 OBJS      := $(SRCS:.c=.o)
 
 TEST_SRCS   := tests/unit/test_model_loader.c src/model/model.c src/io/json.c
@@ -98,6 +102,26 @@ $(TEST_PNG_BIN): $(TEST_PNG_OBJS)
 
 test-png: $(TEST_PNG_BIN)
 	./$(TEST_PNG_BIN)
+
+TEST_IMG_BIN := build/test_image
+TEST_IMG_SRCS := tests/unit/test_image.c src/image/hd_image.c src/io/png_wrap.c src/model/model.c src/io/json.c
+TEST_IMG_OBJS := $(TEST_IMG_SRCS:.c=.o)
+$(TEST_IMG_BIN): $(TEST_IMG_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_IMG_OBJS) -lm -l:libjpeg.so.8
+
+test-image: $(TEST_IMG_BIN)
+	./$(TEST_IMG_BIN)
+
+TEST_LAYOUT_BIN := build/test_layout_pipe
+TEST_LAYOUT_SRCS := tests/unit/layout_pipe.c src/image/layout.c src/image/hd_image.c src/io/json.c src/model/model.c src/io/png_wrap.c
+TEST_LAYOUT_OBJS := $(TEST_LAYOUT_SRCS:.c=.o)
+$(TEST_LAYOUT_BIN): $(TEST_LAYOUT_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_LAYOUT_OBJS) -lm -l:libjpeg.so.8
+
+test-layout: $(TEST_LAYOUT_BIN)
+	./$(TEST_LAYOUT_BIN)
 
 TEST_SEQ_BIN := build/test_sequence
 TEST_SEQ_SRCS := tests/unit/test_sequence.c src/runtime/sequence.c src/runtime/request.c $(CORE_SRCS)
@@ -183,20 +207,20 @@ $(TEST_M15_BIN): $(TEST_M15_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_M15_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
 
-$(BIN): $(OBJS)
+$(BIN): $(OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++ -l:libjpeg.so.8
+
+
 
 %.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
-
 $(CUBIN)/%.o: src/cuda/%.cu
 	@mkdir -p $(CUBIN)
 	$(NVCC) -arch=sm_121 -O2 -std=c++17 $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
-
 clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-seq test-decode test-sanity clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-decode test-sanity clean
