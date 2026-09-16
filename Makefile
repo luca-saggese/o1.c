@@ -89,6 +89,16 @@ $(TEST_RNG_BIN): $(TEST_RNG_OBJS)
 test-rng: $(TEST_RNG_BIN)
 	./$(TEST_RNG_BIN)
 
+TEST_PNG_BIN := build/test_png_roundtrip
+TEST_PNG_SRCS := tests/unit/test_png_roundtrip.c src/io/png_wrap.c
+TEST_PNG_OBJS := $(TEST_PNG_SRCS:.c=.o)
+$(TEST_PNG_BIN): $(TEST_PNG_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_PNG_OBJS) -lm
+
+test-png: $(TEST_PNG_BIN)
+	./$(TEST_PNG_BIN)
+
 TEST_M17B_BIN := build/test_m1_7_base
 TEST_M17B_SRCS := tests/unit/test_m1_7_base.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_M17B_OBJS := $(TEST_M17B_SRCS:.c=.o)
@@ -158,4 +168,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png clean
