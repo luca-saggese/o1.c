@@ -11,6 +11,12 @@
 
 #include "cuda.h"
 
+/* Frozen Dev recipe timesteps (pipeline.py DEFAULT_TIMESTEPS). */
+static const int HD_DEV_DEFAULT_TIMESTEPS[28] = {
+    999, 987, 974, 960, 945, 929, 913, 895, 877, 857, 836, 814, 790, 764,
+    737, 707, 675, 640, 602, 560, 515, 464, 409, 347, 278, 199, 110, 8,
+};
+
 hd_status hd_scheduler_init(hd_scheduler *s, const float *sigmas,
                             int num_steps, float noise_clip_std) {
     if (!s || !sigmas || num_steps <= 0 || num_steps > HD_SCHED_MAX_STEPS) {
@@ -23,6 +29,27 @@ hd_status hd_scheduler_init(hd_scheduler *s, const float *sigmas,
     s->step_index = 0;
     s->noise_clip_std = noise_clip_std;
     return HD_OK;
+}
+
+/*
+ * Production sigma derivation: sigmas = timesteps/1000 plus a trailing 0.0
+ * (pipeline.py build_scheduler with explicit timesteps_list). The Dev recipe
+ * uses the frozen DEFAULT_TIMESTEPS; other recipes derive from the scheduler
+ * class (flash: linspace sigma_max->sigma_min then shift). For now the Dev
+ * recipe is the only production path, so this fills sigmas from
+ * DEFAULT_TIMESTEPS. Returns the number of sigmas written (num_steps+1).
+ */
+int hd_scheduler_derive_dev(hd_scheduler *s, float noise_clip_std) {
+    if (!s) return 0;
+    memset(s, 0, sizeof(*s));
+    for (int i = 0; i < 28; i++) {
+        s->sigmas[i] = (float)HD_DEV_DEFAULT_TIMESTEPS[i] / 1000.0f;
+    }
+    s->sigmas[28] = 0.0f;
+    s->num_steps = 29;
+    s->step_index = 0;
+    s->noise_clip_std = noise_clip_std;
+    return 29;
 }
 
 float hd_scheduler_sigma(const hd_scheduler *s) {

@@ -58,4 +58,11 @@ hd_status hd_scheduler_step(hd_scheduler *s,
 /* Current sigma (sigmas[step_index]) for the caller's v_cond computation. */
 float hd_scheduler_sigma(const hd_scheduler *s);
 
+/*
+ * Production sigma derivation for the Dev recipe: sigmas = DEFAULT_TIMESTEPS/1000
+ * plus a trailing 0.0 (pipeline.py build_scheduler with explicit timesteps_list).
+ * Fills `s` and returns the number of sigmas written (29 for Dev).
+ */
+int hd_scheduler_derive_dev(hd_scheduler *s, float noise_clip_std);
+
 #endif /* HD_SCHEDULER_H */
