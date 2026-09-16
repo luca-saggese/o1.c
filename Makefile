@@ -3,7 +3,7 @@
 CC      ?= gcc
 NVCC    ?= nvcc
 CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra
-CPPFLAGS += -Iinclude -Isrc/io -Isrc/model -Isrc/cuda
+CPPFLAGS += -Iinclude -Isrc/io -Isrc/model -Isrc/cuda -Isrc/runtime
 
 CUDA_HOME  ?= /usr/local/cuda
 CUDA_CPPFLAGS := -I$(CUDA_HOME)/include
@@ -78,6 +78,16 @@ $(TEST_M17_BIN): $(TEST_M17_OBJS) $(CUDA_OBJS)
 
 test-m17: $(TEST_M17_BIN)
 	./$(TEST_M17_BIN)
+
+TEST_RNG_BIN := build/test_torch_rng
+TEST_RNG_SRCS := tests/unit/test_torch_rng.c src/runtime/torch_rng.c
+TEST_RNG_OBJS := $(TEST_RNG_SRCS:.c=.o)
+$(TEST_RNG_BIN): $(TEST_RNG_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_RNG_OBJS) -lm
+
+test-rng: $(TEST_RNG_BIN)
+	./$(TEST_RNG_BIN)
 
 TEST_M17B_BIN := build/test_m1_7_base
 TEST_M17B_SRCS := tests/unit/test_m1_7_base.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
