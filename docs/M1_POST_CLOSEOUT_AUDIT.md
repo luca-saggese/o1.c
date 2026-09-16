@@ -74,88 +74,88 @@ Verification order per FASE 10. Each item uses the fixed structure below.
 
 ## ITEM-01 — Capability matrix frozen and complete (spec §3, §78)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
-- commit: c909300 docs(m1-post): freeze complete hidream feature surface
-- test:
-- artifact: docs/M1_POST_CAPABILITY_MATRIX.md, docs/M1_POST_MODE_CONTRACTS.md, docs/M1_POST_SCHEDULER_MATRIX.md, artifacts/m1post/audit/A–G
-- source file:
+- commit: c909300 docs(m1-post): freeze complete hidream feature surface (M1-post.0)
+- test: (docs gate — no runtime test applicable)
+- artifact: docs/M1_POST_CAPABILITY_MATRIX.md (capability × Full/Base/Dev/Dev-2604 matrix, 27 rows incl. profile recipes), docs/M1_POST_MODE_CONTRACTS.md, docs/M1_POST_SCHEDULER_MATRIX.md
+- source file: (audit) artifacts/m1post/audit/A_UPSTREAM_FEATURE_AUDIT.md … G_TEST_TOOLING_AUDIT.md — git-ignored, present locally
 - documentation: M1_POST_FULL_FEATURE_PARITY.md §3, §78
 
-Missing: docs/M1_POST_UPSTREAM_FEATURE_AUDIT.md (spec-named artifact)
+Missing: docs/M1_POST_UPSTREAM_FEATURE_AUDIT.md (spec §2 names this file; content exists as git-ignored artifacts/m1post/audit/A–G). Non-blocking: matrix + mode contracts + scheduler matrix cover the required audit outputs; unknowns are recorded as blockers in the frozen docs.
 
-Action: confirm capability matrix content; record missing spec-named audit doc.
+Action: none for the gate. Optional follow-up (non-blocking): promote a consolidated audit to docs/ before M2.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-02 — Production native T2I path (§79, §9)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
-- commit: 140ebdf, b17cbcc, 4341f14
-- test:
-- artifact: artifacts/m1/final_sanity/dev_native_seed123456.{png,json,log}
-- source file: src/runtime/generate.c, src/runtime/sequence.c
-- documentation: docs/M1_POST_STATUS.md
+- commit: 140ebdf (request ABI + t2i sequence builder), b17cbcc (attention scratch + native 1024 runner), 4341f14 (native image pipeline + generation CLI)
+- test: make test-sanity → build/sanity_gen (tests/unit/sanity_gen.c) — 28-step full chain, 5 assertions passed, 0 failed (log: "5 assertions passed, 0 failed")
+- artifact: artifacts/m1/final_sanity/dev_native_seed123456.png (1024x1024 RGB, 3.1 MB) + .json + .log — steps=28, seed=123456, scheduler=flash (derive_dev, 29 sigmas), runtime="native C/CUDA only", network="offline", no NaN/Inf, final z range [-1.1797, 1.2578]
+- source file: tests/unit/sanity_gen.c (native RNG seed+1, native forward, native scheduler, decode.c patch/pixel head, png_wrap.c)
+- documentation: docs/M1_POST_STATUS.md; spec §9 (prompt→seed→dims→profile→PNG, no frozen noise fixture, no Python, no network) and §79 gate
 
-Missing:
+Missing: none. §79 "M1 numerical suite still green" is a regression check → covered by final regression (FASE 16), not a per-item blocker.
 
-Action: confirm 28-step full generation artifact + assertions.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-03 — Native seed / RNG path (§10, §79)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
 - commit: 131860d feat(m1): add torch-exact CPU RNG with bitwise gate
-- test: make test-rng (tests/unit/test_torch_rng.c)
-- artifact: artifacts/m1/golden/M1_RNG
-- source file: src/runtime/torch_rng.c
-- documentation:
+- test: make test-rng → build/test_torch_rng — PASS n=1,8,15,16,17,31,32,1024 (bit-exact), TORCH_RNG_GATE_OK (run 2026-09-17)
+- artifact: artifacts/m1/golden/M1_RNG/randn_n{1,8,15,16,17,31,32,1024}_seed123457.txt (golden fixtures)
+- source file: src/runtime/torch_rng.c (MT19937 + randn bitwise port), tests/unit/test_torch_rng.c
+- documentation: spec §10 (seed → deterministic native initial state; bit-exact match not required unless frozen — here it IS frozen and bit-exact)
 
-Missing:
+Missing: none.
 
-Action: run make test-rng, confirm bitwise gate.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-04 — Native image input decode / output decode / PNG (§48, §54, §79)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
 - commit: 2be7727 feat(m1): vendor iris PNG encoder; 448b412 unified output decode
-- test: make test-image (test_image.c), make test-png (test_png_roundtrip.c), make test-decode (test_decode.c)
-- artifact:
+- test: make test-decode → 6 assertions passed (byte-for-byte vs reference loop, clamp, mid-gray, last pixel); make test-image → ALL IMAGE TESTS PASSED (16 checks: calc_dims, resize, to_patches einops rearrange, PNG write/load roundtrip, keep_aspect); make test-png → PNG_ROUNDTRIP_OK (all run 2026-09-17)
+- artifact: artifacts/m1/final_sanity/dev_native_seed123456.png (1024x1024 RGB, written by png_wrap.c)
 - source file: src/image/hd_image.c, src/io/png_wrap.c, src/runtime/decode.c
 - documentation: artifacts/m1post/audit/C_IMAGE_IO_AUDIT.md
 
-Missing:
+Missing: none.
 
-Action: run test-decode + test-image + test-png.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-05 — 1024² generation works (§79)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
-- commit: b17cbcc
-- test: make test-sanity
-- artifact: artifacts/m1/final_sanity/dev_native_seed123456.png (1024×1024)
+- commit: b17cbcc fix(m1-post): correct attention scratch allocation and add native 1024 generation runner
+- test: make test-sanity → build/sanity_gen, 5 assertions passed (28-step chain at 1024²)
+- artifact: artifacts/m1/final_sanity/dev_native_seed123456.png — PNG header verified 1024×1024 (2026-09-17); JSON width=1024 height=1024 grid=32x32
 - source file: tests/unit/sanity_gen.c
 - documentation: docs/M1_POST_STATUS.md
 
-Missing:
+Missing: none.
 
-Action: confirm PNG dimensions from artifact JSON.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-06 — 2048 model path characterized (§11, §12, §68, §80)
 
