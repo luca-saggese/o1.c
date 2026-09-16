@@ -159,54 +159,59 @@ Last checked: 2026-09-17
 
 ## ITEM-06 — 2048 model path characterized (§11, §12, §68, §80)
 
-Status: NEEDS_EVIDENCE
+Status: BLOCKED_M2
 
 Evidence:
-- commit:
-- test:
-- artifact:
-- source file: src/runtime/sequence.c (resolution snapping)
-- documentation: docs/M1_POST_SCHEDULER_MATRIX.md
+- commit: 140ebdf (sequence builder, shape-generic), 2be7727/448b412 (decode path); docs/M1_MEMORY_LIFETIMES.md §11-12 (2048 characterization)
+- test: make test-sequence (S=23 geometry gate, shape-generic builder); no 2048 full run exists
+- artifact: none (no 2048 run)
+- source file: src/runtime/sequence.c (hd_resolution_snap: 2048×2048 default + 11 predefined resolutions incl. 2304×1728, 2560×1440, 3104×1312; hd_seq_t2i derives grid/S from H/W generically)
+- documentation: docs/M1_MEMORY_LIFETIMES.md §11-12, docs/M2_CANDIDATES.md, docs/M1_POST_CAPABILITY_MATRIX.md (row "High-res (2048)" = resolution snapping ✅, NOT full 2048 generation)
 
-Missing: no 2048 run or measured blocker recorded
+Missing: full 2048 generation run (blocked, not missing code)
 
-Action: classify as A PASS / B BLOCKED_M2 / C MISSING; if C, implement resolution path; if B, record S, workspace bytes, failure point.
+Case B evidence (semantics/shape correct, O(S²) impractical):
+- S = 4115 (DEV-2048)
+- workspace: scores+probs ≈ 2.17 GB (2165.9 MB) alone; peak ≈ 2.7-2.9 GB
+- failure point: reference materialized attention O(S²) — scores+probs both [Q,S,S]; M1.3a decision: no silent OOM, no 2048 special-case now; FlashAttention/custom attention deferred to M2
 
-Last checked:
+Action: none for M1-post (BLOCKED_M2). Capability matrix row is about snapping, not full 2048 gen — no doc change needed.
+
+Last checked: 2026-09-17
 
 ## ITEM-07 — Resolution snapping / aspect ratios (§11, §12, §80)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
-- commit:
-- test:
-- artifact:
-- source file:
-- documentation: docs/M1_POST_SCHEDULER_MATRIX.md (PREDEFINED_RESOLUTIONS, find_closest_resolution)
+- commit: 140ebdf (sequence builder incl. hd_resolution_snap)
+- test: make test-seq → 4/4 PASS (pos_f32/mask/vinput_mask byte-identical to M1.4 fixture); direct verification of find_closest_resolution recorded in docs/M1_POST_STATUS.md (audit subagents A–G over frozen oracle)
+- artifact: none required (pure function)
+- source file: src/runtime/sequence.c hd_resolution_snap — 11 buckets exactly matching PREDEFINED_RESOLUTIONS (utils.py:11-24): 2048², 2304×1728, 1728×2304, 2560×1440, 1440×2560, 2496×1664, 1664×2496, 3104×1312, 1312×3104, 2304×1792, 1792×2304; closest-aspect-ratio selection matches find_closest_resolution (utils.py:190-200); default 2048×2048
+- documentation: docs/M1_POST_SCHEDULER_MATRIX.md (PREDEFINED_RESOLUTIONS, find_closest_resolution), docs/M1_POST_CAPABILITY_MATRIX.md (Aspect ratios row)
 
-Missing: native find_closest_resolution implementation not confirmed
+Missing: none. (Optional: dedicated unit test for hd_resolution_snap — not required for gate; parity already directly verified.)
 
-Action: locate native snapping implementation + targeted test.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-08 — Long prompts not truncated / Unicode exact at tokenizer (§14, §63, §80)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
-- commit: 94501b1 fix(m1): full-vocab tokenizer with sorted-table binary search
-- test: make test-tokenizer
-- artifact:
-- source file: src/model/tokenizer.c
-- documentation:
+- commit: 94501b1 fix(m1): full-vocab tokenizer with sorted-table binary search (151,643-entry vocab, +757k lines tables)
+- test: make test-tokenizer → ALL TOKENIZER TESTS PASSED (14/14: template exact, canonical prompt → 17 ids frozen-exact, teapot prompt → 51 ids frozen-exact, deterministic, empty prompt → 8 template ids) (run 2026-09-17)
+- artifact: none required (pure function)
+- source file: src/model/tokenizer.c — no truncation/clip anywhere (full input consumed; hd_tokenizer_encode processes entire string); UTF-8 helpers (utf8_next, cp_is_ws), GPT-2 byte-to-unicode mapping, sorted-table binary search over full vocab
+- documentation: spec §14, §63, §80
 
-Missing: long-text/multilingual corpus not frozen
+Missing: none for the tokenizer gate. Long-text sanity ARTIFACTS are separate items (ITEM-09 English, ITEM-10 Chinese — still MISSING).
 
-Action: run make test-tokenizer; check full-vocab coverage.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-09 — English long-text sanity artifact (§14, §63, §74)
 
