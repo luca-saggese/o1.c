@@ -88,6 +88,15 @@ $(TEST_M17B_BIN): $(TEST_M17B_OBJS) $(CUDA_OBJS)
 test-m17-base: $(TEST_M17B_BIN)
 	./$(TEST_M17B_BIN)
 
+TEST_M17BL_BIN := build/test_m1_7_base_local
+TEST_M17BL_SRCS := tests/unit/test_m1_7_base_local.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
+TEST_M17BL_OBJS := $(TEST_M17BL_SRCS:.c=.o)
+$(TEST_M17BL_BIN): $(TEST_M17BL_OBJS) $(CUDA_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_M17BL_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
+
+test-m17-base-local: $(TEST_M17BL_BIN)
+	./$(TEST_M17BL_BIN)
+
 test-tokenizer: $(TEST_TOK_BIN)
 	./$(TEST_TOK_BIN)
 

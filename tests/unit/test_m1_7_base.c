@@ -120,6 +120,43 @@ static void dev_free(void *p) { if (p) cudaFree(p); }
 /* Golden binary layout rows from the meta JSON ("tensors" array). */
 typedef struct { size_t offset; size_t nbytes; char name[64]; } gtensor;
 
+/* Row-wise diagnostics (mirror test_full_forward.c): per-row RMSE/NRMSE/
+ * cosine/RMS_ref/RMS_native/max_abs. Used to localize drift to specific
+ * rows (e.g. the TMS row) instead of relying on flattened global metrics. */
+static void row_compare(const char *tag, const void *dev, const void *bin,
+                        const gtensor *ref, int rows, int Hw) {
+    int64_t n = ref->nbytes / 2;
+    if (n != (int64_t)rows * Hw) {
+        printf("  %-26s (size %lld != %d*%d, skipped)\n", tag, (long long)n, rows, Hw);
+        return;
+    }
+    float *cf = malloc((size_t)n * sizeof(float));
+    float *rf = malloc((size_t)n * sizeof(float));
+    void *host = malloc((size_t)n * 2);
+    cudaMemcpy(host, dev, (size_t)n * 2, cudaMemcpyDeviceToHost);
+    hd_bf16_buf_to_f32(host, cf, (size_t)n);
+    hd_bf16_buf_to_f32((const char *)bin + ref->offset, rf, (size_t)n);
+    printf("  %s (row-wise, every %d rows):\n", tag, rows / 8 + 1);
+    for (int r = 0; r < rows; r++) {
+        const float *cr = cf + (size_t)r * Hw;
+        const float *rr = rf + (size_t)r * Hw;
+        double rms_c = 0, rms_r = 0, dot = 0, sd2 = 0, mx = 0;
+        for (int k = 0; k < Hw; k++) {
+            double a = cr[k], b = rr[k], d = a - b;
+            rms_c += a * a; rms_r += b * b; dot += a * b; sd2 += d * d;
+            double ad = fabs(d); if (ad > mx) mx = ad;
+        }
+        rms_c = sqrt(rms_c / Hw); rms_r = sqrt(rms_r / Hw);
+        double nr = rms_r > 0 ? sqrt(sd2 / Hw) / rms_r : 0.0;
+        double cs = (rms_c > 0 && rms_r > 0) ? dot / (rms_c * rms_r * Hw) : 0.0;
+        if (r % (rows / 8 + 1) == 0 || r == rows - 1)
+            printf("    row %2d  nrmse=%.5g cos=%.8g RMS_ref=%.4g RMS_na=%.4g max_abs=%.4g\n",
+                   r, nr, cs, rms_r, rms_c, mx);
+        (void)cs;
+    }
+    free(cf); free(rf); free(host);
+}
+
 static int load_golden_layout(const char *meta_path, gtensor *list, size_t cap) {
     size_t msz = 0;
     void *mb = read_file_bytes(meta_path, &msz);
@@ -355,10 +392,12 @@ int main(void) {
     g = find_tensor(glist, gn, "06_block_mid_output");
     if (g) ok &= compare_ckpt("block_mid", diag_bmid, golden, g, 1e-2, 0.9999);
     else { CHECK(0, "golden missing block mid"); ok = 0; }
+    if (g) row_compare("block_mid(native)", diag_bmid, golden, g, S, H);
 
     g = find_tensor(glist, gn, "07_block_last_output");
     if (g) ok &= compare_ckpt("block_last", diag_blast, golden, g, 3e-2, 0.999);
     else { CHECK(0, "golden missing block last"); ok = 0; }
+    if (g) row_compare("block_last(native)", diag_blast, golden, g, S, H);
 
     g = find_tensor(glist, gn, "08_final_norm_input");
     if (g) ok &= compare_ckpt("final_norm_input", diag_bnorm, golden, g, 3e-2, 0.999);
