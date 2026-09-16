@@ -79,6 +79,15 @@ $(TEST_M17_BIN): $(TEST_M17_OBJS) $(CUDA_OBJS)
 test-m17: $(TEST_M17_BIN)
 	./$(TEST_M17_BIN)
 
+TEST_M17B_BIN := build/test_m1_7_base
+TEST_M17B_SRCS := tests/unit/test_m1_7_base.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
+TEST_M17B_OBJS := $(TEST_M17B_SRCS:.c=.o)
+$(TEST_M17B_BIN): $(TEST_M17B_OBJS) $(CUDA_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_M17B_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
+
+test-m17-base: $(TEST_M17B_BIN)
+	./$(TEST_M17B_BIN)
+
 test-tokenizer: $(TEST_TOK_BIN)
 	./$(TEST_TOK_BIN)
 
@@ -130,4 +139,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base clean
