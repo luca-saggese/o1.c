@@ -40,11 +40,25 @@ official upstream audit. Source: `python/models/pipeline.py`, `utils.py`,
 
 ## 5. Skeleton conditioning
 
-- **UNSUPPORTED** in audited source (no OpenPose parser). Blocked until upstream defines semantics.
+- **SUPPORTED_BY_UPSTREAM / IMPLEMENTATION_REQUIRED** (see capability matrix).
+- The official upstream `main` declares IP-pipeline skeleton support and ships the
+  "Multi-Reference Subject-Driven Personalization with Skeleton" example, using
+  `face`, `background`, `openpose`, and part references through the normal
+  `--ref_images` path. No dedicated OpenPose parser exists in the frozen oracle
+  source; skeleton semantics are carried by the generic multi-reference path.
+- Native engine: route skeleton refs through the same `hd_seq_build` multi-ref
+  path (K refs, ordered concat), with the skeleton image as one of the refs.
+  Whether face/bg/openpose/parts are differentiated by order, metadata, filename,
+  or content only is still under audit (see capability matrix blockers).
 
 ## 6. Storyboard
 
-- **UNSUPPORTED** in audited source (no multi-panel decomposition). Blocked.
+- **ADVERTISED_CAPABILITY / SEMANTICS_NOT_YET_ESTABLISHED** (see capability matrix).
+- The official README advertises storyboard as a model feature, but no dedicated
+  API/pipeline was found in the frozen oracle. Audit continues in README,
+  technical report, assets/examples, and prompt-agent/web workflow before
+  deciding how to implement it. Do not close as unsupported merely because no
+  flag/string with that name exists in the model code.
 
 ## 7. Prompt refinement
 

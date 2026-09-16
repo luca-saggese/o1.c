@@ -124,7 +124,7 @@ test-layout: $(TEST_LAYOUT_BIN)
 	./$(TEST_LAYOUT_BIN)
 
 TEST_SEQ_BIN := build/test_sequence
-TEST_SEQ_SRCS := tests/unit/test_sequence.c src/runtime/sequence.c src/runtime/request.c $(CORE_SRCS)
+TEST_SEQ_SRCS := tests/unit/test_sequence.c src/runtime/sequence.c src/runtime/request.c src/model/tokenizer.c $(CORE_SRCS)
 TEST_SEQ_OBJS := $(TEST_SEQ_SRCS:.c=.o)
 $(TEST_SEQ_BIN): $(TEST_SEQ_OBJS)
 	@mkdir -p $(dir $@)
