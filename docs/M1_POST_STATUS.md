@@ -1,10 +1,10 @@
 # M1-post Status
 
 ## Current sub-step
-M1-post.0 — upstream feature audit + capability matrix (in progress → commit)
+M1-post.1 — production native T2I path (request ABI + sequence builder done; 1024² fixture + runner in progress via background agents)
 
 ## Last completed gate
-M1 (numerical correctness) — closed. M1-post.0 audit complete.
+M1-post.0 audit complete (committed `c909300`). Unified request ABI + T2I sequence builder committed (`140ebdf`), sequence parity gate 4/4 PASS.
 
 ## Frozen identities
 - Oracle SHA: `3237a638a5c2c7be106b0175958f4c0db8c2dfbf` (config/oracle.lock)
@@ -29,6 +29,7 @@ M1 (numerical correctness) — closed. M1-post.0 audit complete.
 ## Commands executed
 - 7 parallel audit subagents (A–G) over frozen oracle source
 - Direct verification of DEFAULT_TIMESTEPS, find_closest_resolution, keep_original_aspect
+- `make test-seq` — sequence parity gate vs M1.4 fixture: pos_f32/mask/vinput_mask byte-identical (4/4 PASS)
 
 ## Commands failed
 - (none)
@@ -37,6 +38,7 @@ M1 (numerical correctness) — closed. M1-post.0 audit complete.
 1. Skeleton conditioning: no OpenPose parser in audited source → UNSUPPORTED unless upstream defines it.
 2. Storyboard: no multi-panel decomposition in audited source → UNSUPPORTED.
 3. Per-step noise RNG: CUDA Philox in oracle; native uses CPU MT19937 stand-in (documented).
+4. Native tokenizer (297-token subset) cannot encode the teapot prompt → 1024² sequence fixture from oracle pure functions (in progress, seq-builder-2 agent).
 
 ## Next action
-Commit M1-post.0 gate (`docs(m1-post): freeze complete hidream feature surface`), then start M1-post.1 (production native T2I + seed + output path) — in progress via sanity runner.
+Integrate 1024² sanity sequence fixture + native generation runner (background agents), then run the 28-step Dev 1024² generation → PNG output.
