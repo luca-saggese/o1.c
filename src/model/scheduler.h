@@ -22,7 +22,7 @@
 
 #include "hidream.h"
 
-#define HD_SCHED_MAX_STEPS 32
+#define HD_SCHED_MAX_STEPS 64 /* Full/Base FlowUniPC needs 50+1=51 sigmas */
 
 typedef struct {
     float sigmas[HD_SCHED_MAX_STEPS]; /* manifest schedule (fp64->fp32) */
@@ -64,5 +64,86 @@ float hd_scheduler_sigma(const hd_scheduler *s);
  * Fills `s` and returns the number of sigmas written (29 for Dev).
  */
 int hd_scheduler_derive_dev(hd_scheduler *s, float noise_clip_std);
+
+/*
+ * Generic "flash" (Dev) sigma derivation matching
+ * FlashFlowMatchEulerDiscreteScheduler.set_timesteps (python/models/flash_scheduler.py
+ * lines 195-245). The schedule is a linear ramp in *timestep* space from
+ * sigma_max to sigma_min (both already shift-scaled at init), divided by
+ * num_train_timesteps (1000), then the shift is applied again, and a terminal
+ * 0.0 is appended. `shift` is the shift factor. Returns num_steps+1 sigmas.
+ */
+int hd_scheduler_derive_flash(hd_scheduler *s, int steps, float shift,
+                              float noise_clip_std);
+
+/*
+ * "flow_match" (Dev-edit) sigma derivation matching
+ * FlowMatchEulerDiscreteScheduler.set_timesteps. Identical arithmetic to the
+ * flash derivation (same shift formula); kept separate for clarity. Returns
+ * num_steps+1 sigmas.
+ */
+int hd_scheduler_derive_flow_match(hd_scheduler *s, int steps, float shift,
+                                   float noise_clip_std);
+
+/*
+ * "default" (Full/Base) sigma derivation matching
+ * FlowUniPCMultistepScheduler.set_timesteps (python/models/fm_solvers_unipc.py
+ * lines 166-215). Unlike flash/flow_match, the ramp is linear in *sigma*
+ * space from sigma_max to sigma_min over num_inference_steps+1 points,
+ * dropped to the first num_inference_steps, then shift applied, then a
+ * terminal 0.0 appended. Returns num_steps+1 sigmas.
+ */
+int hd_scheduler_derive_default(hd_scheduler *s, int steps, float shift,
+                                float noise_clip_std);
+
+/*
+ * noise_scale_schedule value for step index i (pipeline oracle):
+ *   [start + (end-start)*i/(num_steps-1) for i in range(num_steps)]  if num_steps>1
+ *   [start]                                                          otherwise
+ * num_steps is the number of inference steps (not sigmas). Returns the s_noise
+ * for the given step index.
+ */
+float hd_scheduler_noise_scale(const hd_scheduler *s, int step_index,
+                               float noise_scale_start, float noise_scale_end);
+
+/* ------------------------------------------------------------------ */
+/* FlowUniPC multistep solver (Full/Base default path)                */
+/* ------------------------------------------------------------------ */
+
+#define HD_UNIPC_ORDER 2 /* solver_order for FlowUniPCMultistepScheduler */
+
+/*
+ * Persistent UniPC solver state. model_outputs is a ring buffer of
+ * solver_order entries (newest at index ORDER-1); each entry is a caller
+ * scratch buffer of length n. last_sample is also caller scratch (length n).
+ * Reset by zeroing the struct and re-pointing the buffers before the first
+ * step.
+ */
+typedef struct {
+    float *model_outputs[HD_UNIPC_ORDER]; /* ring, newest at index ORDER-1 */
+    float *last_sample;                   /* pre-predictor sample (scratch) */
+    int has_last_sample;
+    int this_order;         /* effective UniC order for the current step */
+    int lower_order_nums;   /* warmup counter for multistep */
+    int step_index;         /* current step (0-based) */
+} hd_scheduler_unipc;
+
+/*
+ * One UniPC multistep step for the "default" FlowUniPCMultistepScheduler
+ * (python/models/fm_solvers_unipc.py, solver_order=2, predict_x0=True,
+ * solver_type="bh2", lower_order_final=True). Implements the convert ->
+ * (optional) UniC corrector -> history shift -> UniP predictor chain in fp32
+ * matching the oracle's torch operation order.
+ *
+ *   model_output  [n] fp32  -v_guided at the current step
+ *   sample        [n] fp32  current sample (z_prev, fp32)
+ *   prev_sample   [n] fp32  output sample
+ *   scratch       [6*n] fp32 temporaries
+ *
+ * Uses s->sigmas as the schedule and advances u->step_index by one.
+ */
+hd_status hd_scheduler_unipc_step(const hd_scheduler *s, hd_scheduler_unipc *u,
+                                  const float *model_output, const float *sample,
+                                  float *prev_sample, int n, float *scratch);
 
 #endif /* HD_SCHEDULER_H */
