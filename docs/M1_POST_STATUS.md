@@ -46,3 +46,8 @@ M1-post.1 runner: native 1024² generation runner (`tests/unit/sanity_gen.c`) bu
 
 ## Next action
 Run the final 28-step Dev 1024² generation (seed 123456, teapot prompt) → PNG + JSON + log under `artifacts/m1/final_sanity/`, then mark M1-post COMPLETE.
+## M1-post integration phase (current sub-step)
+- Sub-step: M1-post.1→.12 implementation (parallel workstreams)
+- Last completed gate: attention fix + 1-step decode/PNG validation (b17cbcc)
+- Current engine commit: b17cbcc
+- Plan: parallel subagents for tokenizer-full / image-pipeline / scheduler-matrix; integrator (main agent) owns unified sequence builder ref modes + CLI generation path. GPU/oracle runs serialized.
