@@ -122,6 +122,17 @@ test-decode: $(TEST_DECODE_BIN)
 TEST_M17B_BIN := build/test_m1_7_base
 TEST_M17B_SRCS := tests/unit/test_m1_7_base.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_M17B_OBJS := $(TEST_M17B_SRCS:.c=.o)
+
+TEST_SANITY_BIN := build/sanity_gen
+TEST_SANITY_SRCS := tests/unit/sanity_gen.c src/model/block.c src/model/forward.c \
+                    src/model/scheduler.c src/runtime/decode.c src/runtime/torch_rng.c \
+                    src/io/png_wrap.c $(CORE_SRCS) src/model/weights.c
+TEST_SANITY_OBJS := $(TEST_SANITY_SRCS:.c=.o)
+$(TEST_SANITY_BIN): $(TEST_SANITY_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SANITY_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
+
+test-sanity: $(TEST_SANITY_BIN)
 $(TEST_M17B_BIN): $(TEST_M17B_OBJS) $(CUDA_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_M17B_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) -lm -lstdc++
 
@@ -188,4 +199,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-seq test-decode clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-seq test-decode test-sanity clean

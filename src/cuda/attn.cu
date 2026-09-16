@@ -154,7 +154,7 @@ void hd_attention_eager(const void *q_dev, const void *k_dev, const void *v_dev,
 
     long total_o = (long)heads * seq * dim;
     uint16_t *hm = NULL;
-    e = cudaMalloc(&hm, (size_t)((long)heads * seq * dim));
+    e = cudaMalloc(&hm, (size_t)((long)heads * seq * dim) * sizeof(uint16_t));
     if (e != cudaSuccess) { cudaFree(scratch); snprintf(hd_cuda_errbuf(), 512, "attn hm: %s", cudaGetErrorString(e)); return; }
     hd_attn_out_kernel<<<(total_o + 255) / 256, 256>>>(
         (const uint16_t *)probs_dev, (const uint16_t *)v_dev, hm,
