@@ -52,7 +52,17 @@ SEED = 42
 RES = 64            # FAST_VALIDATION_RES
 PATCH_SIZE = 32
 TMS_TOKEN_ID = 151673
-TIMESTEP = 999.0
+# Timestep domain (frozen oracle semantics, docs/M1_FORWARD_CONTRACT.md §5):
+#   scheduler_timestep = 999            (first scheduler step)
+#   sigma              = 999/1000 = 0.999
+#   model_timestep     = 1 - sigma ≈ 0.001   (what model.forward receives)
+#   embedder_input     = model_timestep * 1000 ≈ 1.0
+# The embedder multiplies by 1000 internally (TimestepEmbedder.forward).
+# NOTE: this fixture is LEGACY/INVALID FOR PIPELINE SEMANTICS — it passes
+# scheduler_timestep directly to the embedder (input 999000). Kept for
+# history; do NOT use it for Base or any new gate.
+SCHEDULER_TIMESTEP = 999.0
+MODEL_TIMESTEP = 1.0 - SCHEDULER_TIMESTEP / 1000.0   # ≈ 0.001
 MID_LAYER = 17      # of 36 -> "middle" frozen choice
 MID_LAYER = 18      # frozen choice: layer 18 of 36 (spec allows 17 or 18)
 NOISE_SCALE = 8.0
@@ -162,7 +172,9 @@ def main():
     attention_mask_4d = causal.unsqueeze(0).unsqueeze(0)     # [1,1,23,23]
 
     lm = model.model.language_model
-    timestep = torch.tensor([TIMESTEP], device=device, dtype=torch.float32)
+    # LEGACY semantics: this fixture passes scheduler_timestep directly to the
+    # embedder (embedder input = 999000). Kept for history only.
+    timestep = torch.tensor([SCHEDULER_TIMESTEP], device=device, dtype=torch.float32)
 
     # ---- replicate _forward_generation steps 1-4 EXACTLY ----
     # 1. text token embeddings
@@ -273,7 +285,14 @@ def main():
         "stored_dtype": "float32_bf16pairs",
         "seed": SEED,
         "prompt": PROMPT,
-        "timestep": TIMESTEP,
+        "scheduler_timestep": SCHEDULER_TIMESTEP,
+        "sigma": SCHEDULER_TIMESTEP / 1000.0,
+        "model_timestep": MODEL_TIMESTEP,
+        "timestep_embedder_input": MODEL_TIMESTEP * 1000.0,
+        "timestep_semantics": "LEGACY/INVALID FOR PIPELINE SEMANTICS: "
+                              "scheduler_timestep passed directly to embedder "
+                              "(input 999000). Correct pipeline passes "
+                              "model_timestep=1-sigma≈0.001; embedder x1000.",
         "noise_scale": NOISE_SCALE,
         "text_seq_len": TS,
         "image_tokens": image_tokens,
@@ -317,7 +336,7 @@ def main():
     print("\n=== checkpoint plan (frozen) ===")
     for name, _dt, _shape, _data, _role in payloads:
         print(f"  {name:34s} shape={list(_shape)} {len(_data)}B")
-    print(f"\nseq_len={S} text={TS} img={image_tokens} timestep={TIMESTEP}")
+    print(f"\nseq_len={S} text={TS} img={image_tokens} scheduler_timestep={SCHEDULER_TIMESTEP}")
     print(f"lm forward {t_lm:.3f}s, head {t_head:.3f}s, total {time.time()-t0:.2f}s")
     print(f"golden -> {GOLDEN_ROOT}  [{offset} B, sha {bin_sha[:16]}...]")
     print("sanity checks OK (all finite)")

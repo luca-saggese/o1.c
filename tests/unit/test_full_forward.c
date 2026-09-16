@@ -14,6 +14,12 @@
  * documented in docs/M1_NUMERICAL_CONTRACT.md section 6. The contract is
  * frozen, do not tune to pass.
  *
+ * LEGACY FIXTURE: M1_V3_DEV_FORWARD_0 passes scheduler_timestep (999.0)
+ * directly into hd_forward, so the timestep embedder receives 999000
+ * (INVALID for pipeline semantics; pipeline passes model_timestep ≈ 0.001,
+ * embedder x1000 → ≈1.0). This fixture is kept as history and for regression
+ * on the legacy path; new gates (e.g. M1.7 Base) use model_timestep.
+ *
  * BF16 compute / FP32 accumulate. A single device-resident forward executes
  * the SAME production path hd_forward; diagnostics observe it in-place.
  */
@@ -245,7 +251,7 @@ int main(void) {
         if (!strcmp(nm, "pos_f32")) off_pos = off;
         else if (!strcmp(nm, "mask")) off_mask = off;
         else if (!strcmp(nm, "vinputs")) off_vin = off;
-        else if (!strcmp(nm, "timestep")) off_ts = off;
+        else if (!strcmp(nm, "timestep")) off_ts = off;  /* LEGACY: scheduler_timestep */
     }
     hd_json_free(imeta);
 

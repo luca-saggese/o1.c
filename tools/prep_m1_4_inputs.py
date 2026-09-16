@@ -91,7 +91,6 @@ def main():
 
     timestep = torch.tensor([999.0], dtype=torch.float32)  # [1] f32
     pos_f32 = position_ids.float().contiguous()    # [3,1,23] f32
-
     def bf16_b(t):
         return t.to(torch.bfloat16).cpu().contiguous().view(torch.int16).numpy().astype("<u2").tobytes()
     def f32_b(t):
@@ -115,9 +114,17 @@ def main():
                      "offset": offset, "nbytes": len(data)})
         offset += len(data)
     bin_path.write_bytes(b"".join(p[3] for p in payloads))
+    # LEGACY fixture: the "timestep" input tensor holds scheduler_timestep
+    # (999.0), which the legacy native test feeds to hd_forward directly.
+    # Correct pipeline semantics: model_timestep = 1 - 999/1000 ≈ 0.001.
     interim = {"oracle_sha": ORACLE_SHA, "fixture_id": "M1_V3_DEV_FORWARD_0",
-               "seed": SEED, "timestep": 999.0, "ttime": time.strftime(
-                   "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "seed": SEED, "scheduler_timestep": 999.0,
+               "sigma": 0.999, "model_timestep": 0.001,
+               "timestep_embedder_input": 1.0,
+               "timestep_semantics": "LEGACY/INVALID FOR PIPELINE SEMANTICS: "
+                                     "input tensor holds scheduler_timestep "
+                                     "(999.0), not model_timestep",
+               "ttime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "note": "reconstructed inputs; no transformer forward run",
                "tensors": rows,
                "bin": {"file": "inputs.bin", "nbytes": offset,

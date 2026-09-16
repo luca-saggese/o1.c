@@ -238,12 +238,17 @@ def main():
     ], {"n_heads": NH, "head_dim": HD, "layout": "seq-major [H,S,D] per contract 5.1"})
 
     # ---- timestep embedding ----
-    t = torch.tensor([999], device=device)  # first scheduler timestep
+    # Pure-function embedder capture: input t is the embedder input directly
+    # (embedder multiplies by 1000 internally). Value 999 is a test point,
+    # NOT a pipeline timestep. Pipeline semantics: model_timestep ≈ 0.001 ->
+    # embedder input ≈ 1.0.
+    t = torch.tensor([999], device=device)
     t_emb = model.model.t_embedder1(t)            # [1,4096] bf16 (full mlp: silu included)
     writer.add("t_emb_0", "timestep_embed", "B", [
         ("t", "int64", [1], i64_bytes(t)),
         ("out_t_emb", "bfloat16", t_emb.shape, bf16_bytes(t_emb)),
-    ], {"timestep": 999, "freq_size": 256, "max_period": 10000})
+    ], {"embedder_input": 999, "freq_size": 256, "max_period": 10000,
+        "note": "pure-function embedder test point; not a pipeline timestep"})
 
     # ---- gemm_t_emb_0: t_embedder1.mlp[0] Linear(256,4096) on the freq embedding ----
     # oracle: t_freq = self.timestep_embedding(t*1000, 256); t_emb = self.mlp[0](t_freq)
