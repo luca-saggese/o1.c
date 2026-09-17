@@ -153,6 +153,16 @@ $(TEST_SEQDIAG_BIN): $(TEST_SEQDIAG_OBJS)
 test-seq-diag: $(TEST_SEQDIAG_BIN)
 	./$(TEST_SEQDIAG_BIN)
 
+TEST_SEQPROF_BIN := build/seq_profiles
+TEST_SEQPROF_SRCS := tests/unit/seq_profiles.c src/runtime/sequence.c src/runtime/request.c src/model/tokenizer.c $(CORE_SRCS)
+TEST_SEQPROF_OBJS := $(TEST_SEQPROF_SRCS:.c=.o)
+$(TEST_SEQPROF_BIN): $(TEST_SEQPROF_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SEQPROF_OBJS) -lm
+
+test-seq-profiles: $(TEST_SEQPROF_BIN)
+	./$(TEST_SEQPROF_BIN)
+
 TEST_DECODE_BIN := build/test_decode
 TEST_DECODE_SRCS := tests/unit/test_decode.c src/runtime/decode.c
 TEST_DECODE_OBJS := $(TEST_DECODE_SRCS:.c=.o)
@@ -273,4 +283,4 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-decode test-refiner test-progress test-preview test-sanity clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity clean
