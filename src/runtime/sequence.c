@@ -444,17 +444,166 @@ void hd_sequence_free(hd_sequence *s) {
     memset(s, 0, sizeof(*s));
 }
 
+/* ------------------------------------------------------------------ */
+/* Sequence manifest diagnostics (M1-post §56)                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Frozen model dims for the workspace estimate (mirror tests/unit/
+ * sanity_gen.c and src/model/forward.c layout): H=4096, NH=32, NKV=8,
+ * HD=128, ff_hidden=12288, head_out=3072.
+ */
+#define DIAG_H       4096
+#define DIAG_NH      32
+#define DIAG_NKV     8
+#define DIAG_HD      128
+#define DIAG_FF      12288
+#define DIAG_HEADOUT 3072
+
+/* Known special-token ids (tokenizer.h + sequence builder). */
+static const struct { int id; const char *name; } k_diag_special[] = {
+    { 151644, "im_start"   },
+    { 151645, "im_end"     },
+    { 151652, "vision_start" },
+    { 151653, "vision_end" },
+    { 151655, "image_pad"  },
+    { 151656, "video_pad"  },
+    { 151669, "boi"        },
+    { 151673, "tms"        },
+};
+
+/*
+ * Documented workspace estimate (forward.c forward_layout_offsets +
+ * block.c hd_decoder_block_scratch_bytes, both CPU-reproducible):
+ *   persistent regions: hidden_a/b, h_text, norm_out, head_out, t_emb,
+ *   te_hidden, freq fp32/bf16, t_scaled, xe_stage, xe_out
+ *   block scratch: bf16 q/k/v/scores/probs/attn/mlp buffers + fp32
+ *   cos/sin + mrope slack
+ * Attention scores+probs alone are 2*NH*S^2 bf16 elements = 128*S^2
+ * bytes (reproduces ITEM-06: S=4115 -> 2,167,452,800 B = 2165.9 MB).
+ */
+static int64_t diag_workspace_bytes(const hd_sequence *s,
+                                    int64_t *scores_probs) {
+    int64_t S = s->S, img = s->image_len, text = s->text_len;
+    int64_t H = DIAG_H, NH = DIAG_NH, NKV = DIAG_NKV, HD = DIAG_HD;
+    int64_t FF = DIAG_FF;
+
+    int64_t sp = 2 * NH * S * S * 2;   /* scores + probs, bf16 */
+    if (scores_probs) *scores_probs = sp;
+
+    int64_t o = 0;
+    o += S * H * 2;                    /* hidden_a  */
+    o += S * H * 2;                    /* hidden_b  */
+    o += text * H * 2;                 /* h_text    */
+    o += S * H * 2;                    /* norm_out  */
+    o += S * DIAG_HEADOUT * 2;         /* head_out  */
+    o += H * 2;                        /* t_emb     */
+    o += H * 2;                        /* te_hidden */
+    o += 256 * 4;                      /* freq fp32 */
+    o += 256 * 2;                      /* freq_bf16 */
+    o += 4;                            /* t_scaled  */
+    o += img * 1024 * 2;               /* xe_stage  */
+    o += img * H * 2;                  /* xe_out    */
+    o = (o + 7) & ~(int64_t)7;
+
+    int64_t e = 0;
+    e += S * H;                        /* in_ln       */
+    e += 3 * S * NH * HD;              /* qp, q, qr   */
+    e += 3 * S * NKV * HD;             /* kp, k, kr   */
+    e += 2 * S * NKV * HD;             /* vp, v       */
+    e += NH * S * S;                   /* scores      */
+    e += NH * S * S;                   /* probs       */
+    e += S * NH * HD;                  /* attn_sm     */
+    e += 3 * S * H;                    /* attn_m/h/r  */
+    e += S * H;                        /* post        */
+    e += 3 * S * FF;                   /* gate, up, swi */
+    e += 2 * S * H;                    /* mlp, mlp_r  */
+    int64_t bs = e * 2 + 2 * S * HD * 4 + 256;
+    return o + bs;
+}
+
 int hd_seq_diag(const hd_sequence *s, const char *tag) {
     if (!s) return -1;
+    const char *t = tag ? tag : "-";
     printf("[seq:%s] text_len=%d image_len=%d S=%d img_begin=%d\n",
-           tag ? tag : "-", s->text_len, s->image_len, s->S, s->img_begin);
-    printf("[seq:%s] sec=[%lld %lld %lld] n_refs=%d\n", tag ? tag : "-",
+           t, s->text_len, s->image_len, s->S, s->img_begin);
+    printf("[seq:%s] sec=[%lld %lld %lld] n_refs=%d\n", t,
            (long long)s->sec[0], (long long)s->sec[1], (long long)s->sec[2],
            s->n_refs);
     for (int i = 0; i < s->n_refs && i < HD_SEQ_MAX_REFS; i++)
-        printf("[seq:%s] ref[%d] len=%d begin=%d\n", tag ? tag : "-", i,
+        printf("[seq:%s] ref[%d] len=%d begin=%d\n", t, i,
                s->ref_len[i], s->ref_begin[i]);
     printf("[seq:%s] pos=[3,1,%d] mask=[1,1,%d,%d] vinput=[%d..%d)\n",
-           tag ? tag : "-", s->S, s->S, s->S, s->img_begin, s->S);
+           t, s->S, s->S, s->S, s->img_begin, s->S);
+
+    /* text tokens (input_ids[0..text_len)) */
+    printf("[seq:%s] text_tokens[%d]=", t, s->text_len);
+    for (int i = 0; i < s->text_len; i++)
+        printf("%s%lld", i ? " " : "", (long long)s->input_ids[i]);
+    printf("\n");
+
+    /* special-token indices (first occurrence + count per known id).
+     * hd_seq_t2i stores only the text tokens in input_ids (vision tokens
+     * are implicit); hd_seq_build stores the full S-token sequence. */
+    int scan_n = (s->n_refs > 0) ? s->S : s->text_len;
+    printf("[seq:%s] special_tokens:", t);
+    int printed = 0;
+    for (size_t k = 0; k < sizeof(k_diag_special) / sizeof(k_diag_special[0]);
+         k++) {
+        int first = -1, count = 0;
+        for (int i = 0; i < scan_n; i++) {
+            if (s->input_ids[i] == k_diag_special[k].id) {
+                if (first < 0) first = i;
+                count++;
+            }
+        }
+        if (count > 0) {
+            printf("%s %s@%d(x%d)", printed ? "," : "",
+                   k_diag_special[k].name, first, count);
+            printed = 1;
+        }
+    }
+    if (!printed) printf(" none");
+    printf("\n");
+
+    /* MRoPE sections */
+    printf("[seq:%s] mrope_sections=[%lld %lld %lld] total=%lld\n", t,
+           (long long)s->sec[0], (long long)s->sec[1], (long long)s->sec[2],
+           (long long)(s->sec[0] + s->sec[1] + s->sec[2]));
+
+    /* prediction-mask spans: rows with any bf16-min above the diagonal are
+     * causal text rows; fully-zeroed rows are full-attention token rows. */
+    printf("[seq:%s] mask_spans:", t);
+    int in_causal = 0, in_full = 0;
+    for (int r = 0; r < s->S; r++) {
+        int causal = 0;
+        for (int c = r + 1; c < s->S; c++) {
+            size_t off = ((size_t)r * s->S + c) * 2;
+            if (s->mask_bf16[off] == 0x7Fu && s->mask_bf16[off + 1] == 0xFFu) {
+                causal = 1;
+                break;
+            }
+        }
+        if (causal && !in_causal) {
+            if (in_full) printf("..%d]", r - 1);
+            printf(" causal[%d", r);
+            in_causal = 1; in_full = 0;
+        } else if (!causal && !in_full) {
+            if (in_causal) printf("..%d]", r - 1);
+            printf(" full[%d", r);
+            in_full = 1; in_causal = 0;
+        }
+    }
+    if (in_causal) printf("..%d]", s->S - 1);
+    if (in_full) printf("..%d]", s->S - 1);
+    if (!in_causal && !in_full) printf(" none");
+    printf("\n");
+
+    /* workspace estimate */
+    int64_t sp = 0;
+    int64_t total = diag_workspace_bytes(s, &sp);
+    printf("[seq:%s] workspace_estimate: scores+probs=%lld B, total=%lld B "
+           "(%.1f MB)\n", t, (long long)sp, (long long)total,
+           (double)total / (1024.0 * 1024.0));
     return 0;
 }
