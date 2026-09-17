@@ -2,148 +2,233 @@
 
 A from-scratch **native C/CUDA inference engine** for the
 [HiDream O1 Image](https://huggingface.co/HiDream-ai) foundation image model,
-targeted at the **NVIDIA GB10** (DGX Spark) platform. The engine re-implements
-the model's transformer math in hand-written CUDA kernels, validated
-tensor-by-tensor against a frozen Python oracle, so that **production inference
-never depends on Python**.
+targeted at the **NVIDIA GB10** (DGX Spark) platform: compute capability 12.1
+(`-arch=sm_121`), CUDA 13.0 toolchain. The engine re-implements the model's
+transformer math in hand-written CUDA kernels, validated tensor-by-tensor
+against a frozen Python oracle, so that **production inference never depends
+on Python**.
 
-> **Status:** M0 (oracle/model/startup pinning) and M1.1 (weight ingestion into
-> deterministic CUDA buffers) are complete. M1.2 (reference CUDA transformer
-> primitives) is in flight. See [`MILESTONES.md`](MILESTONES.md) for the
-> authoritative milestone ladder and [`docs/M1_STATUS.md`](docs/M1_STATUS.md)
-> for current execution state.
+> **Status:** Milestones **M0, M1, M1.1, M1.2, and M1-post are COMPLETE** —
+> the production native T2I path is working end-to-end (28-step Dev
+> generation at 1024², PNG output, no Python at runtime). **M2 (performance /
+> pre-baseline) is in progress**: cuDNN SDPA attention and a persistent cuBLAS
+> GEMM production backend are frozen, with the numerical discrepancy
+> documented in [`docs/M2_CUBLAS_FREEZE.md`](docs/M2_CUBLAS_FREEZE.md). See
+> [`MILESTONES.md`](MILESTONES.md) for the milestone ladder,
+> [`docs/M1_POST_CLOSEOUT.md`](docs/M1_POST_CLOSEOUT.md) for the feature
+> closeout table, and [`docs/M1_POST_STATUS.md`](docs/M1_POST_STATUS.md) for
+> execution state.
 
 ---
 
 ## What this project is
 
 `o1.c` builds a deterministic, reproducible inference path for HiDream O1
-Image using only C code and hand-written CUDA kernels. The pipeline is
+Image using only C code and hand-written CUDA kernels. The production
+pipeline is
 
 ```
-GGUF/config lock  ->  weight ingestion (safetensors)  ->  CUDA tensor buffers
-      ->  transformer primitives (norm, rope, gemm, attention, ...)  ->  forward
+build/hidream (CLI, src/main.c)
+  -> hd_generate (src/runtime/generate.c)   sequence build, scheduler, denoise loop
+  -> hd_forward  (src/model/forward.c)      transformer forward, hand-written CUDA kernels
+  -> decode + PNG output (src/runtime/decode.c, src/image/)
 ```
 
-The reference implementation of every primitive is validated against a
-**golden fixture** captured once from the official HiDream/Transformers oracle.
-This enforces an engineering discipline where the Python upstream is treated
-strictly as an oracle — a source of truth for semantics — rather than as a
-runtime dependency.
+Every primitive is validated against golden fixtures captured once from the
+frozen official HiDream/Transformers oracle. The Python upstream is treated
+strictly as an oracle — a source of truth for semantics — never as a runtime
+dependency.
 
 ## Core principles
 
-- **Python is an oracle, not a runtime.** The official upstream checkout lives
-  at `/python` (relative to the project root), is read-only and git-ignored,
-  and is never patched. Production inference is pure C/CUDA.
-- **Reproducibility is contractual.** Revisions, versions, hashes, environment
-  facts, and gate evidence are persisted to files (locks, manifests, run
-  ledger); a branch name is never a substitute for an immutable commit.
-- **Zero-forward validation during development.** M0–M1.2 forbid transformer
-  forward passes and image generation. Primitives are validated at the
-  metadata/dtype/GEMM level against frozen golden tensors (validation levels
-  V0–V2). Full model runs are scarce validation resources, not a debugging
-  loop.
-- **Dev/Base symmetry.** The Dev and Base/Full model profiles stay supported
-  through one shared configuration and code path.
+- **Python is an oracle, not a runtime.** The frozen upstream checkout lives
+  in `python/` (read-only, git-ignored) and is used only for offline
+  validation. Production inference is pure C/CUDA.
+- **Reproducibility is contractual.** Revisions, versions, hashes, and gate
+  evidence are persisted to locks and manifests (`config/`); a branch name is
+  never a substitute for an immutable commit.
+- **Cheap validation first.** The validation cost ladder (V0–V6) reserves
+  full 28/50-step generations for milestone closure; most gates run on
+  metadata, startup-only loads, or 1–3 denoising steps.
+- **Dev/Base symmetry.** Dev and Base/Full profiles share one configuration
+  and code path; only profile parameters differ.
 - **Ownership boundaries.** Only engine code (`src/`, `tools/`, `config/`,
-  `docs/`, `scripts/`) is versioned. Oracle checkout, model weights, HF caches,
-  build output, and generated runtime data are ignored.
-
-A fuller statement of these invariants lives in
-[`docs/WORKING_MODE.md`](docs/WORKING_MODE.md).
+  `docs/`, `scripts/`, `tests/`) is versioned. Oracle checkout, model
+  weights, build output, and generated artifacts are git-ignored.
 
 ## Repository layout
 
 ```
 include/      Public C ABI header(s)          (hidream.h)
 src/          C/CUDA engine sources
+  main.c      Engine entry point (CLI)
+  model/      Profiles, config, weights, tokenizer, scheduler, forward
+  runtime/    Request, sequence builder, generate, decode, preview, refiner
+  cuda/       Hand-written CUDA kernels (norm, rope, gemm, attn, act, embed,
+              residual, sched, support)
   io/         JSON, safetensors, sha256 readers
-  model/      Model profile, config, weight ingestion
-  cuda/       Reference CUDA primitives (norm, rope, gemm, attn, act)
-  main.c      Engine entry point
-tests/unit/   C test harnesses (model loader, weights, primitives)
+  image/      PNG encode/decode
+tests/        C test harnesses (unit + integration)
 tools/        Python oracle helpers (freeze, capture, guard/ledger)
 config/       Versioned locks and model profiles (oracle.lock, models.lock,
-              dev.json, base.json, startup/tensor manifests)
+              dev.json, base.json, manifests)
 scripts/      Bootstrap scripts (checkout oracle, download models, freeze)
-docs/         Milestone specs, working mode, status, golden contracts
-artifacts/    Git-ignored runtime evidence (env, oracle, models, golden)
-build/        Git-ignored build output
-/python/      Git-ignored oracle checkout (upstream, read-only)
-/models/      Git-ignored model weights (dev/, base/)
+docs/         Milestone specs, status, contracts, closeout evidence
+models/       Git-ignored model weights (dev/, base/)
+python/       Git-ignored frozen oracle checkout (validation only)
+build/        Git-ignored build output (build/hidream, test binaries)
+artifacts/    Git-ignored runtime evidence (golden fixtures, run ledger)
 ```
 
-`artifacts/` holds all reproducible evidence and is git-ignored by design;
-only compact, intentionally-versioned manifests are committed into `config/`.
+## Model profiles
 
-## Configuration & locking
+| Profile | steps | guidance | shift | scheduler | dtype |
+|---------|-------|----------|-------|-----------|-------|
+| **dev** | 28 | 0.0 | 1.0 | flash | BF16 |
+| **base** | 50 | 5.0 | 3.0 | default (UniPC) | BF16 |
 
-- **Oracle pin** — [`config/oracle.lock`](config/oracle.lock) freezes the
-  upstream HiDream repository URL, branch, and exact commit SHA.
-- **Model pins** — [`config/models.lock`](config/models.lock) pins each model
-  profile to an immutable Hugging Face revision and records the local path and
-  download status. Dev is downloaded; Base/Full may be configured but not yet
-  downloaded.
-- **Model profiles** — `config/dev.json` / `config/base.json` carry dtype,
-  step count, and topology. Dev and Base are symmetric profiles over one
-  shared code path.
-- **Startup freeze** — `config/startup_manifest_dev.json` captures a canonical
-  prompt, token IDs, timesteps, scheduler/config metadata.
-- **Tensor manifest** — `config/tensor_manifest_dev.json` records the structure
-  of every state-dict tensor (name, shape, dtype, numel) without parameter
-  values.
+Frozen model dims: H=4096, NH=32, NKV=8, HD=128, ff_hidden=12288,
+head_out=3072, NLAYERS=36, PATCH=32. Weights live in `models/dev` and
+`models/base` (8 safetensors shards each), pinned to immutable revisions in
+`config/models.lock`. The frozen oracle is pinned by commit SHA in
+`config/oracle.lock`.
 
-## Build & test
+## Build & run
 
-A CUDA 13 toolchain and cuBLAS (`libcublas.so.13` / `libcublasLt.so.13`) are
-required; the target is NVIDIA GB10 compute capability 12.1 (`-arch=sm_121`).
+Requires a CUDA 13 toolchain, cuBLAS (`libcublas.so.13` / `libcublasLt.so.13`)
+and cuDNN (`libcudnn.so`, cuDNN 9.20) with the cuDNN C++ Frontend vendored in
+`third_party/cudnn-frontend/`; target is NVIDIA GB10, `-arch=sm_121`.
 
 ```sh
 make            # build the engine (build/hidream)
-make test       # run the C test suites (model loader + weights)
-make test-primitives   # M1.2 reference CUDA primitive tests (when wired)
+make test       # build all test binaries
 make clean
 ```
 
-The build is gcc-based; the `src/cuda/` primitives compile with `nvcc` and are
-linked into the test/engine binaries via the `Makefile` CUDA rules.
+Timing instrumentation (`-DO1_DEBUG_TIMING`) and a `make timing` target are
+available for the M2 pre-baseline. The production GEMM backend is persistent
+cuBLAS (`cublasGemmEx`, BF16 in/out, FP32 accumulate); the hand-written
+reference GEMM remains selectable via `hd_gemm_set_backend(0)` for
+correctness/debug only.
 
-## Validation workflow
+## CLI usage
 
-The golden-fixture pipeline (V2 level) is:
+```
+build/hidream [options]
+  --model dev|base        profile to use (default: dev)
+  --prompt TEXT           user prompt
+  --mode t2i|edit|personalize|...   generation mode (default: t2i)
+  --ref-image PATH        reference image (repeatable, edit/personalize)
+  --width N               output width (default: 1024)
+  --height N              output height (default: 1024)
+  --steps N               inference steps (default per profile)
+  --seed N                RNG seed (default: 123456)
+  --scheduler flash|default|flow_match   (default per profile)
+  --guidance F            CFG scale (default per profile)
+  --shift F               scheduler shift (default per profile)
+  --noise-start F         noise_scale_start (default 8.0)
+  --noise-end F           noise_scale_end (default 8.0)
+  --noise-clip F          noise_clip_std (default 8.0)
+  --output PATH           output PNG path (default: output.png)
+  --model-dir DIR         override profile local_path
+  --device N              CUDA device index (default: 0)
+```
 
-1. **Oracle checkout** — `scripts/m0/01_checkout_oracle.sh` pins the official
-   upstream revision under `/python` (read-only).
-2. **Model acquisition** — `scripts/m0/02_download_models.sh dev` downloads Dev
-   weights into git-ignored `models/dev` and writes `config/models.lock`.
-3. **Startup freeze** — `scripts/m0/03_freeze_startup.sh dev` captures the
-   canonical freeze manifest without any forward pass.
-4. **Fixture capture** — `tools/capture_m1_2_fixtures.py` produces deterministic
-   golden tensors for each primitive (single model load, no forward, no
-   generation) under `artifacts/m1/golden/`.
-5. **Guard + ledger** — `tools/m1_guard.py` verifies offline environment,
-   exact versions, and oracle cleanliness, and records every run in
-   `artifacts/m1/run_ledger.jsonl` with validation level and forward count.
+Example:
 
-Every gate leaves durable evidence and is recorded in
-`docs/M1_STATUS.md`; the reproducibility contract is defined in
-`docs/M1_2_GOLDEN_CONTRACT.md` and `docs/M1_NUMERICAL_CONTRACT.md`.
+```sh
+./build/hidream --model dev --prompt "a teapot" --steps 28 --seed 123456 \
+  --output out.png
+```
 
-## Contributing / engineering etiquette
+## Test suite
 
-- Prefer existing scripts over ad-hoc shell sequences; improve an engine-side
-  bootstrap script if reproducibility requires it, never the oracle.
-- Never commit model weights, caches, or large generated artifacts.
-- Never replace an immutable revision with a branch name.
-- Keep each commit a single logical gate, and run the tests before check-in;
-  keep `docs/*_STATUS.md` current.
-- If unsure whether an action counts as model execution, treat it as forbidden
-  until proven startup-only.
+`make test-*` targets (all C/CUDA, no Python):
 
-## Milestones
+| Target | Covers |
+|--------|--------|
+| `test-rng` | native RNG parity vs oracle |
+| `test-png` / `test-image` | PNG encode/decode, image I/O |
+| `test-layout` | layout conditioning sequence (bit-exact) |
+| `test-seq` / `test-seq-ref` | sequence builder parity vs M1.4 fixture / oracle ground truth |
+| `test-seq-diag` | sequence manifest diagnostics + workspace estimate |
+| `test-seq-profiles` | frozen per-mode sequence geometry (perf freeze §70) |
+| `test-decode` | output decode (unpatchify) |
+| `test-refiner` | prompt refiner clients |
+| `test-progress` / `test-preview` | progress callback / preview extraction |
+| `test-sanity` | native 1024² runner (1-step decode + PNG) |
+| `test-m17` | M1.7 full-forward numerical gate (incl. `test-m17-base`) |
+| `test-tokenizer` | native tokenization (incl. long/multilingual text) |
+| `test-gemm-smoke` | deterministic cuBLAS GEMM mapping check |
+| `test-layer-replay` | layer-by-layer reference-vs-cuBLAS chain comparison |
+| `test-final-head` | final-head GEMM decisive test (5 configs) |
+| `bench-block` | per-stage decoder block benchmark (CUDA events) |
 
-See [`MILESTONES.md`](MILESTONES.md) for the full specification. In short:
-M0 pins the oracle/model/startup; M1 loads weights and implements the reference
-CUDA transformer primitives with V2 golden validation; later milestones build
-the full deterministic forward and image generation.
+## Milestone status
+
+| Milestone | Status | Summary |
+|-----------|--------|---------|
+| M0 | ✅ COMPLETE | Oracle/model/startup pinned; reproducible environment |
+| M1 | ✅ COMPLETE | Native profiles, weight ingestion, CUDA primitives, forward, scheduler, tokenizer, full 28-step Dev inference validated |
+| M1.1 | ✅ COMPLETE | Weight ingestion into deterministic CUDA buffers |
+| M1.2 | ✅ COMPLETE | Reference CUDA transformer primitives (V2 golden parity) |
+| M1-post | ✅ COMPLETE | Production T2I path, feature parity (editing, multi-ref, layout, long text), perf freeze; closeout finishing |
+| M2 | 🚧 IN PROGRESS | Performance / pre-baseline: timing instrumentation, benchmark harness, cuDNN SDPA attention, persistent cuBLAS GEMM backend (frozen) |
+| M3 | ⏳ planned | Production loader / memory optimization |
+
+Known limitation: **2048×2048 is `BLOCKED_M2`** — semantics are correct and
+shape-generic, but the materialized O(S²) attention workspace (≈2.17 GB for
+scores+probs at S=4115, ≈2.85 GB total) exceeds the GB10 budget. Fixing it
+(flash/chunked attention) is an M2 item. See
+[`docs/M1_POST_PERF_FREEZE.md`](docs/M1_POST_PERF_FREEZE.md) for the frozen
+sequence geometry table and
+[`docs/M1_POST_CAPABILITY_MATRIX.md`](docs/M1_POST_CAPABILITY_MATRIX.md) for
+the full capability × profile matrix.
+
+## M2 direction
+
+M2 is the performance/pre-baseline milestone: measure before optimizing.
+Current state (see [`docs/M2_CUBLAS_FREEZE.md`](docs/M2_CUBLAS_FREEZE.md)):
+
+- **cuDNN SDPA attention backend** — replaces the eager reference attention in
+  the production path (BF16/GQA, FlashAttention-2 semantics); reference
+  attention kept for correctness comparison.
+- **Persistent cuBLAS GEMM backend** — `cublasGemmEx` (BF16 in/out, FP32
+  accumulate) with handles created once at runtime init; the hand-written
+  reference GEMM (0.28 TFLOP/s) is kept for correctness/debug only.
+- **Frozen performance** — native Dev 1024²/28-step generation ≈27 s vs
+  ≈90 s Python legacy (≈3.3× speedup) and ≈25 min estimated for the old
+  reference GEMM (≈50×+). A known numerical discrepancy (13/14 full-forward
+  PASS on the cuBLAS path) is documented and accepted for the performance
+  freeze; numerical closure is a required follow-up before final release.
+
+Planned work (see `docs/M2_CANDIDATES.md`):
+
+- **Bottleneck profiling** (Nsight Systems/Compute): rank GEMM, attention,
+  normalization, elementwise kernels, launches, memory movement.
+- **Low-risk execution optimizations**: cuBLASLt plan caching, CUDA Graph
+  capture, kernel fusion, flash/chunked attention (unblocks 2048²), shape
+  specialization.
+- **Precision**: BF16/FP32-native path first; FP8/FP4 only later, each with
+  its own numerical/quality contract.
+- **Quality suite**: fixed prompt corpus with perceptual + image metrics,
+  prerequisite for any quality-affecting precision work.
+
+Every optimization must keep the M1 correctness gates green (V2/V3 before any
+V5 rerun).
+
+## References
+
+- [`MILESTONES.md`](MILESTONES.md) — milestone ladder and validation cost ladder
+- [`docs/M1_POST_STATUS.md`](docs/M1_POST_STATUS.md) — M1-post execution state
+- [`docs/M1_POST_CLOSEOUT.md`](docs/M1_POST_CLOSEOUT.md) — feature closeout table
+- [`docs/M1_POST_CAPABILITY_MATRIX.md`](docs/M1_POST_CAPABILITY_MATRIX.md) — capability × profile matrix
+- [`docs/M1_POST_PERF_FREEZE.md`](docs/M1_POST_PERF_FREEZE.md) — frozen sequence geometry (§70)
+- [`docs/M1_POST_SCHEDULER_MATRIX.md`](docs/M1_POST_SCHEDULER_MATRIX.md) — scheduler recipes
+- [`docs/M2_CANDIDATES.md`](docs/M2_CANDIDATES.md) — M2 optimization backlog
+- [`docs/M2_CUBLAS_FREEZE.md`](docs/M2_CUBLAS_FREEZE.md) — cuBLAS performance freeze + numerical discrepancy
+- [`docs/WORKING_MODE.md`](docs/WORKING_MODE.md) — engineering invariants
+- Upstream: [HiDream-ai/HiDream-O1-Image](https://huggingface.co/HiDream-ai)
+
+No license file is shipped in this repository; model weights and upstream
+code remain subject to their own licenses.
