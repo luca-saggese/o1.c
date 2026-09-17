@@ -48,6 +48,10 @@ TEST_SDPA_FWD_BIN := build/test_sdpa_forward
 TEST_SDPA_FWD_SRCS := tests/unit/test_sdpa_forward.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_SDPA_FWD_OBJS := $(TEST_SDPA_FWD_SRCS:.c=.o)
 
+BENCH_BLOCK_BIN := build/bench_block
+BENCH_BLOCK_SRCS := tests/unit/bench_block.c src/model/block.c $(CORE_SRCS) src/model/weights.c
+BENCH_BLOCK_OBJS := $(BENCH_BLOCK_SRCS:.c=.o)
+
 TEST_FF_BIN := build/test_full_forward
 TEST_FF_SRCS := tests/unit/test_full_forward.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_FF_OBJS := $(TEST_FF_SRCS:.c=.o)
@@ -286,6 +290,13 @@ $(TEST_SDPA_FWD_BIN): $(TEST_SDPA_FWD_OBJS) $(CUDA_OBJS)
 
 test-sdpa-forward: $(TEST_SDPA_FWD_BIN)
 	LD_LIBRARY_PATH="$(CUDNN_HOME)/lib:$$LD_LIBRARY_PATH" ./$(TEST_SDPA_FWD_BIN)
+
+$(BENCH_BLOCK_BIN): $(BENCH_BLOCK_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(BENCH_BLOCK_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+bench-block: $(BENCH_BLOCK_BIN)
+	LD_LIBRARY_PATH="$(CUDNN_HOME)/lib:$$LD_LIBRARY_PATH" ./$(BENCH_BLOCK_BIN)
 
 $(TEST_FF_BIN): $(TEST_FF_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
