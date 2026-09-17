@@ -19,7 +19,7 @@ CUDNN_HOME ?= /home/lvx/.local/lib/python3.12/site-packages/nvidia/cudnn
 CUDNN_CPPFLAGS := -Ithird_party/cudnn-frontend/include -I$(CUDNN_HOME)/include
 CUDNN_LDFLAGS  := -L$(CUDNN_HOME)/lib -lcudnn
 
-CORE_SRCS := src/model/model.c src/io/json.c src/io/sha256.c src/io/safetensors.c
+CORE_SRCS := src/model/model.c src/io/json.c src/io/sha256.c src/io/safetensors.c src/io/gguf.c
 
 BIN        := build/hidream
 TEST_BIN   := build/test_model_loader
@@ -59,6 +59,10 @@ TEST_FF_OBJS := $(TEST_FF_SRCS:.c=.o)
 TEST_GEMM_BIN := build/test_gemm_smoke
 TEST_GEMM_SRCS := tests/unit/test_gemm_smoke.c
 TEST_GEMM_OBJS := $(TEST_GEMM_SRCS:.c=.o)
+
+TEST_GGUF_BIN := build/test_gguf
+TEST_GGUF_SRCS := tests/unit/test_gguf.c $(CORE_SRCS)
+TEST_GGUF_OBJS := $(TEST_GGUF_SRCS:.c=.o)
 
 TEST_REPLAY_BIN := build/test_layer_replay
 TEST_REPLAY_SRCS := tests/unit/test_layer_replay.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
@@ -106,6 +110,9 @@ test-full-forward: $(TEST_FF_BIN)
 	./$(TEST_FF_BIN)
 
 test-gemm-smoke: $(TEST_GEMM_BIN)
+
+test-gguf: $(TEST_GGUF_BIN)
+	./$(TEST_GGUF_BIN) $(GGUF_PATH) $(GGUF_ST_DIR)
 
 test-layer-replay: $(TEST_REPLAY_BIN)
 
@@ -324,6 +331,10 @@ $(TEST_FF_BIN): $(TEST_FF_OBJS) $(CUDA_OBJS)
 $(TEST_GEMM_BIN): $(TEST_GEMM_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_GEMM_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+$(TEST_GGUF_BIN): $(TEST_GGUF_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_GGUF_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
 
 $(TEST_REPLAY_BIN): $(TEST_REPLAY_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
