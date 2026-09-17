@@ -48,9 +48,9 @@ Audit started: 2026-09-17
 | offline/Python-free runtime | DONE | 4341f14 | Makefile C/CUDA only; no Python/network/HTTP in src/ | — | E |
 | invalid-combination handling | NEEDS_CHECK | — | request.c hd_request_validate (profile/dims/steps/refs) | no dedicated validation test | E |
 | final sanity artifacts | MISSING | — | only long_text_{en,zh} + dev T2I exist | 11 of 13 §74 artifacts missing | F |
-| per-mode fixtures | MISSING | — | — | POST_* fixture set not created | F |
-| perf freeze table | MISSING | — | — | §70 sequence/attention/workspace table | F |
-| sequence manifest diagnostics | MISSING | — | hd_seq_diag declared in sequence.h:111-116 | no implementation | F |
+| per-mode fixtures | DONE | 83a1fbb | fixtures/m1_post/ 10 POST_* manifests, all status:ready, text_len cross-checked | — | F |
+| perf freeze table | DONE | 8129b62 | make test-seq-profiles PASS; docs/M1_POST_PERF_FREEZE.md §70 (S/ws per mode) | — | F |
+| sequence manifest diagnostics | DONE | e2f2aea | make test-seq-diag PASS (7/7); hd_seq_diag prints §56 manifest + workspace estimate | — | F |
 
 ## In-progress / uncommitted (from interrupted session)
 
@@ -71,9 +71,6 @@ Audit started: 2026-09-17
 - CLI (ITEM-51/53) — --ref-image not parsed; 8 parity flags missing
 - public C API (ITEM-54) — generation not exposed in include/hidream.h
 - final sanity artifacts (ITEM-57) — 11 of 13 missing
-- per-mode fixtures (ITEM-59)
-- perf freeze table (ITEM-63)
-- sequence manifest diagnostics (ITEM-64)
 
 ### NEEDS FINAL VALIDATION
 - Dev edit flow_match/flash end-to-end (ITEM-15/16)
@@ -88,4 +85,5 @@ Audit started: 2026-09-17
 
 ### COMPLETE
 - T2I, RNG, 1024, long-text, single-ref seq, multi-ref seq, layout parser,
-  offline runtime, capability matrix
+  offline runtime, capability matrix, per-mode fixtures, perf freeze table,
+  sequence manifest diagnostics
