@@ -1,0 +1,23 @@
+{
+  "fixture": "POST_EDIT_1REF",
+  "mode": "edit",
+  "profile": "edit 1ref",
+  "prompt": "make the sky red",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "refs": [
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12] }
+  ],
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flow_match / flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 1440,
+  "text_len": 160,
+  "image_len": 1024,
+  "ref_count": 1,
+  "ref_tokens": 256,
+  "source": "native sequence build (hd_seq_build, oracle ref geometry)",
+  "status": "ready"
+}

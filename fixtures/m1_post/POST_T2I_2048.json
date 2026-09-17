@@ -1,0 +1,20 @@
+{
+  "fixture": "POST_T2I_2048",
+  "mode": "t2i",
+  "profile": "T2I 2048",
+  "prompt": "a red fox sits under a cherry blossom tree",
+  "dims": { "width": 2048, "height": 2048, "patch": 32 },
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 4115,
+  "text_len": 19,
+  "image_len": 4096,
+  "ref_count": 0,
+  "ref_tokens": 0,
+  "source": "native sequence build (hd_seq_t2i); frozen from BLOCKED_M2 DEV-2048 (ITEM-06)",
+  "status": "ready"
+}

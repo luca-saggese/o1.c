@@ -1,0 +1,20 @@
+{
+  "fixture": "POST_T2I_1024",
+  "mode": "t2i",
+  "profile": "T2I 1024",
+  "prompt": "a red fox sits under a cherry blossom tree",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 1043,
+  "text_len": 19,
+  "image_len": 1024,
+  "ref_count": 0,
+  "ref_tokens": 0,
+  "source": "native sequence build (hd_seq_t2i, M1.4 golden input_ids)",
+  "status": "ready"
+}

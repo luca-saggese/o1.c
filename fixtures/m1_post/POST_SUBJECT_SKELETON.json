@@ -1,0 +1,26 @@
+{
+  "fixture": "POST_SUBJECT_SKELETON",
+  "mode": "skeleton",
+  "profile": "skeleton",
+  "prompt": "skeleton poses of the subject",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "refs": [
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12], "note": "subject photo" },
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12], "note": "pose 1" },
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12], "note": "pose 2" },
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12], "note": "pose 3" }
+  ],
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flow_match / flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 2648,
+  "text_len": 600,
+  "image_len": 1024,
+  "ref_count": 4,
+  "ref_tokens": 1024,
+  "source": "native sequence build (hd_seq_build; subject photo + 3 poses = K=4)",
+  "status": "ready"
+}

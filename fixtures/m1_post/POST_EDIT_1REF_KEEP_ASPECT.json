@@ -1,0 +1,23 @@
+{
+  "fixture": "POST_EDIT_1REF_KEEP_ASPECT",
+  "mode": "edit",
+  "profile": "edit 1ref keep-aspect",
+  "prompt": "keep the original aspect",
+  "dims": { "width": 1024, "height": 2048, "patch": 32 },
+  "refs": [
+    { "width": 1024, "height": 2048, "tokens": 2048, "grid": [32, 64], "cond_grid": [8, 16] }
+  ],
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flow_match / flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 4240,
+  "text_len": 144,
+  "image_len": 2048,
+  "ref_count": 1,
+  "ref_tokens": 2048,
+  "source": "native sequence build (hd_seq_build; keep_original_aspect: tgt dims derived from resized ref, max_size 2048)",
+  "status": "ready"
+}

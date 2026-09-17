@@ -1,0 +1,20 @@
+{
+  "fixture": "POST_T2I_LONG_TEXT",
+  "mode": "t2i",
+  "profile": "T2I 1024 (long prompt)",
+  "prompt": "a cinematic wide shot of a red fox sitting under a cherry blossom tree in full bloom, petals drifting in the wind, soft golden hour light, shallow depth of field, highly detailed fur texture, tranquil Japanese garden background, 8k photography",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 1082,
+  "text_len": 58,
+  "image_len": 1024,
+  "ref_count": 0,
+  "ref_tokens": 0,
+  "source": "native sequence build (hd_seq_t2i, encode_prompt + boi + tms)",
+  "status": "ready"
+}

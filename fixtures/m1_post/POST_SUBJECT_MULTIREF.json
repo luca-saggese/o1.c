@@ -1,0 +1,30 @@
+{
+  "fixture": "POST_SUBJECT_MULTIREF",
+  "mode": "personalize",
+  "profile": "subject many-ref",
+  "prompt": "eight views of the subject",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "refs": [
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [9, 9] }
+  ],
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flow_match / flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 2855,
+  "text_len": 679,
+  "image_len": 1024,
+  "ref_count": 8,
+  "ref_tokens": 1152,
+  "source": "native sequence build (hd_seq_build; K=8, cond_img_size 288)",
+  "status": "ready"
+}

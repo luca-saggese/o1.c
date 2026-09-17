@@ -1,0 +1,25 @@
+{
+  "fixture": "POST_SUBJECT_LAYOUT",
+  "mode": "layout",
+  "profile": "layout",
+  "prompt": "compose the scene with layout",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "refs": [
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12] },
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12] },
+    { "width": 512, "height": 512, "tokens": 256, "grid": [16, 16], "cond_grid": [12, 12], "note": "layout canvas" }
+  ],
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flow_match / flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 2245,
+  "text_len": 453,
+  "image_len": 1024,
+  "ref_count": 3,
+  "ref_tokens": 768,
+  "source": "native sequence build (hd_seq_build; 2 refs + 1 layout canvas = K=3)",
+  "status": "ready"
+}

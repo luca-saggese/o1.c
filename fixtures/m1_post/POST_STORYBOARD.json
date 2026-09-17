@@ -1,0 +1,20 @@
+{
+  "fixture": "POST_STORYBOARD",
+  "mode": "t2i",
+  "profile": "storyboard",
+  "prompt": "panel 1: a red fox sits under a cherry blossom tree, wide shot; panel 2: the fox stands up and looks at the camera, medium shot; panel 3: the fox walks away into the forest, long shot",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 1082,
+  "text_len": 58,
+  "image_len": 1024,
+  "ref_count": 0,
+  "ref_tokens": 0,
+  "source": "native sequence build (hd_seq_t2i, 3-panel sequential prompt); multi-panel single-pass T2I, no dedicated code path (M1_POST_STORYBOARD_FINAL_AUDIT)",
+  "status": "ready"
+}

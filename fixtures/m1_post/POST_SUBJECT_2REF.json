@@ -1,0 +1,24 @@
+{
+  "fixture": "POST_SUBJECT_2REF",
+  "mode": "personalize",
+  "profile": "subject 2ref",
+  "prompt": "two people in a park",
+  "dims": { "width": 1024, "height": 1024, "patch": 32 },
+  "refs": [
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [12, 12] },
+    { "width": 384, "height": 384, "tokens": 144, "grid": [12, 12], "cond_grid": [12, 12] }
+  ],
+  "seed": 0,
+  "steps": 28,
+  "scheduler": "flow_match / flash",
+  "timesteps": "DEFAULT_TIMESTEPS",
+  "guidance": 0.0,
+  "shift": 1.0,
+  "expected_S": 1619,
+  "text_len": 307,
+  "image_len": 1024,
+  "ref_count": 2,
+  "ref_tokens": 288,
+  "source": "native sequence build (hd_seq_build, oracle ref geometry)",
+  "status": "ready"
+}
