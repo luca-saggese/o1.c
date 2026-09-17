@@ -215,37 +215,37 @@ Last checked: 2026-09-17
 
 ## ITEM-09 — English long-text sanity artifact (§14, §63, §74)
 
-Status: MISSING
+Status: VERIFIED_DONE
 
 Evidence:
-- commit:
-- test:
-- artifact: expected artifacts/m1_post/final_sanity/long_text_en.png
-- source file:
-- documentation:
+- commit: 4c39e5c (ledger checkpoint; artifact produced by production CLI from 4341f14 path)
+- test: build/hidream --model dev --prompt "<long EN with quoted sign text>" --width 1024 --height 1024 --steps 28 --seed 123456 → "PASS: generation ... (1024x1024)" (run 2026-09-17)
+- artifact: artifacts/m1_post/final_sanity/long_text_en.png (1024x1024 RGB, 3.1 MB) + long_text_en.json (steps=28, seed=123456, mode=t2i, profile=dev, scheduler=flash, engine_commit=4c39e5c, full prompt recorded)
+- source file: src/main.c (CLI), src/runtime/generate.c (build_t2i_ids → hd_tokenizer_build_template + hd_seq_t2i, full-vocab tokenizer, no truncation)
+- documentation: spec §14 (long English prompt, quoted visible text, punctuation-heavy), §63 (long dense descriptive prompt), §74 (long_text_en.png)
 
-Missing: long_text_en.png not produced; corpus not frozen
+Missing: none.
 
-Action: freeze corpus then generate artifact.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-10 — Chinese long-text sanity artifact (§63, §74)
 
-Status: MISSING
+Status: VERIFIED_DONE
 
 Evidence:
-- commit:
-- test:
-- artifact: expected artifacts/m1_post/final_sanity/long_text_zh.png
-- source file:
-- documentation:
+- commit: 4c39e5c (ledger checkpoint; artifact produced by production CLI from 4341f14 path)
+- test: build/hidream --model dev --prompt "<long ZH + mixed EN>" --width 1024 --height 1024 --steps 28 --seed 123456 → "PASS: generation ... (1024x1024)" (run 2026-09-17)
+- artifact: artifacts/m1_post/final_sanity/long_text_zh.png (1024x1024 RGB, 3.1 MB) + long_text_zh.json (steps=28, seed=123456, mode=t2i, profile=dev, engine_commit=4c39e5c, mixed Chinese/English prompt recorded)
+- source file: src/main.c (CLI), src/runtime/generate.c (full-vocab tokenizer, UTF-8 exact, no truncation)
+- documentation: spec §63 (Chinese visible text, mixed English/Chinese), §74 (long_text_zh.png)
 
-Missing: long_text_zh.png not produced
+Missing: none.
 
-Action: generate from Chinese corpus after ITEM-09 corpus frozen.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-11 — Multi-region text / layout semantics (§16, §26–28, §83)
 
