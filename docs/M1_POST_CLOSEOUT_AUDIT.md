@@ -249,71 +249,85 @@ Last checked: 2026-09-17
 
 ## ITEM-11 — Multi-region text / layout semantics (§16, §26–28, §83)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
 - commit: 5cd4134 feat(m1-post): native layout conditioning with bit-exact oracle parity
-- test: make test-layout (tests/unit/layout_pipe.c)
-- artifact: tests/unit/layout_oracle_dump.txt
+- test: make test-layout → build/test_layout_pipe tests/unit/layout_oracle_dump.txt → ALL PASS (run 2026-09-17): hd_layout_max_size K=1..9 exact (1024/768/512/512/384/384/256), hd_layout_parse 5 boxes all coords exact vs oracle, hd_layout_create_reference_images bit-exact (max abs diff 0.000000)
+- artifact: tests/unit/layout_oracle_dump.txt (oracle ground truth)
 - source file: src/image/layout.c
 - documentation: docs/M1_POST_MODE_CONTRACTS.md §4
 
-Missing: full layout-conditioned sanity image
+Missing: full layout-conditioned sanity IMAGE is ITEM-26 (separate item, still open).
 
-Action: run make test-layout; confirm parser + canvas parity.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-12 — Single-reference decode / preprocess parity (§18, §17, §81)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
 - commit: 2bc625e fix(m1-post): ref-mode sequence builder matches oracle
-- test: make test-seq-ref (tests/unit/test_seq_ref.c)
-- artifact:
-- source file: src/runtime/sequence.c
-- documentation:
+- test: make test-seq-ref → build/test_seq_ref → 55 ok assertions, 0 failed (run 2026-09-17): K=1 hd_seq_build OK, text/tgt/ref geometry, fix_point, vinput_mask covers tgt+refs, vision_start/pad(144)/end, boi, tms, position IDs (ref d0=4128, d1/d2 max=4143), causal mask; K=2 also verified
+- artifact: (reference decode/resize/patch covered by test-image — ITEM-04)
+- source file: src/runtime/sequence.c (hd_seq_build ref-mode)
+- documentation: spec §17 (single-ref path: reference decode, resize, patch/token packing, special-token boundaries, sequence ordering, position IDs, MRoPE, prediction masks), §18, §81
 
-Missing:
+Missing: none for sequence parity. Full native edit ARTIFACT is ITEM-18 (separate).
 
-Action: run make test-seq-ref; confirm K=1 parity.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-13 — Edit sequence matches oracle (§81)
 
-Status: NEEDS_EVIDENCE
+Status: VERIFIED_DONE
 
 Evidence:
-- commit: 2bc625e
-- test: make test-seq-ref
-- artifact:
-- source file: src/runtime/sequence.c
-- documentation:
+- commit: 2bc625e fix(m1-post): ref-mode sequence builder matches oracle
+- test: make test-seq-ref → 55 ok assertions, 0 failed (run 2026-09-17): K=1 edit sequence (text/tgt/ref geometry, fix_point, vinput_mask, vision_start/pad/end, boi, tms, position IDs, causal mask) matches oracle ground truth; K=2 also verified
+- artifact: (oracle ground truth embedded in test)
+- source file: src/runtime/sequence.c (hd_seq_build ref-mode)
+- documentation: spec §81 (edit sequence matches oracle)
 
-Missing:
+Missing: none.
 
-Action: confirm ref-mode sequence parity K=1.
+Action: none.
 
-Last checked:
+Last checked: 2026-09-17
 
 ## ITEM-14 — keep-original-aspect (§19, §81)
 
-Status: NEEDS_EVIDENCE
+Status: PARTIAL
 
 Evidence:
-- commit:
-- test:
-- artifact: expected artifacts/m1_post/final_sanity/edit_keep_aspect.png
-- source file: src/runtime/request.h (keep_original_aspect field)
-- documentation: docs/M1_POST_MODE_CONTRACTS.md §2
+- commit: 2be7727 (hd_image_keep_aspect in src/image/hd_image.c)
+- test: make test-image → "ok keep_aspect 800x600 -> 2336x1760" PASS (oracle parity, pipeline.py:141-157: resize ref to max_size=2048, derive target W/H)
+- artifact: expected artifacts/m1_post/final_sanity/edit_keep_aspect.png (absent)
+- source file: src/image/hd_image.c hd_image_keep_aspect (implemented + tested); src/runtime/request.h keep_original_aspect field (exists)
+- documentation: docs/M1_POST_MODE_CONTRACTS.md §2; spec §19 (--keep-original-aspect flag, max size, patch alignment, resolution snapping, final dims)
 
-Missing: implementation/behavior unconfirmed; artifact absent
+Missing:
+- CLI flag --keep-original-aspect not wired in src/main.c
+- generate.c does not implement edit mode at all (only T2I: build_t2i_ids + hd_seq_t2i; no hd_seq_build, no reference staging, no keep_original_aspect application)
+- edit_keep_aspect.png artifact absent
 
-Action: trace keep_original_aspect through sequence builder; targeted test.
+Plan:
+1. Wire edit mode in generate.c: use hd_seq_build(req,...) for reference-bearing modes, stage reference patches through vinputs, apply hd_image_keep_aspect when keep_original_aspect=1
+2. Add --keep-original-aspect + --ref-image + --mode edit to main.c
+3. Generate edit_keep_aspect.png artifact
+4. Update ledger PARTIAL -> VERIFIED_DONE
 
-Last checked:
+Files expected:
+- src/runtime/generate.c, src/main.c
+- artifacts/m1_post/final_sanity/edit_keep_aspect.png
+
+Validation:
+- make test-seq-ref (sequence parity), make test-image (keep_aspect), then end-to-end edit run
+
+Last checked: 2026-09-17
 
 ## ITEM-15 — Dev edit flow_match (§20, §81)
 
