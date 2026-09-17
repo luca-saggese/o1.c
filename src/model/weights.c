@@ -356,12 +356,22 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
     e = cudaDeviceSynchronize();
     if (e != cudaSuccess) { w_err("cudaDeviceSynchronize: %s", cudaGetErrorString(e)); st = HD_ERR_IO; goto fail; }
 
+    /* M2: persistent cuBLAS/cuBLASLt GEMM runtime (created once, destroyed
+     * in hd_weight_store_free). 64 MiB workspace for cuBLASLt plans. */
+    info.gemm = hd_gemm_runtime_init(device_id, 0);
+    if (!info.gemm) {
+        w_err("gemm runtime init failed: %s", hd_cuda_errbuf());
+        st = HD_ERR_IO;
+        goto fail;
+    }
+
     O1_TIMING_END("MODEL_LOAD");
     *out = info;
     return HD_OK;
 
 fail:
     free(host);
+    if (info.gemm) hd_gemm_runtime_destroy(info.gemm);
     for (int64_t i = 0; i < info.n_allocs; i++) cudaFree(info.allocs[i].dev_ptr);
     free(info.allocs);
     return st;
@@ -369,6 +379,7 @@ fail:
 
 void hd_weight_store_free(hd_weight_store *s) {
     if (!s) return;
+    if (s->gemm) hd_gemm_runtime_destroy(s->gemm);
     for (int64_t i = 0; i < s->n_allocs; i++) {
         if (s->allocs[i].dev_ptr) cudaFree(s->allocs[i].dev_ptr);
     }

@@ -56,6 +56,18 @@ TEST_FF_BIN := build/test_full_forward
 TEST_FF_SRCS := tests/unit/test_full_forward.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_FF_OBJS := $(TEST_FF_SRCS:.c=.o)
 
+TEST_GEMM_BIN := build/test_gemm_smoke
+TEST_GEMM_SRCS := tests/unit/test_gemm_smoke.c
+TEST_GEMM_OBJS := $(TEST_GEMM_SRCS:.c=.o)
+
+TEST_REPLAY_BIN := build/test_layer_replay
+TEST_REPLAY_SRCS := tests/unit/test_layer_replay.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
+TEST_REPLAY_OBJS := $(TEST_REPLAY_SRCS:.c=.o)
+
+TEST_FH_BIN := build/test_final_head
+TEST_FH_SRCS := tests/unit/test_final_head.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
+TEST_FH_OBJS := $(TEST_FH_SRCS:.c=.o)
+
 TEST_TAIL_BIN := build/test_block_tail
 TEST_TAIL_SRCS := tests/unit/test_block_tail.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_TAIL_OBJS := $(TEST_TAIL_SRCS:.c=.o)
@@ -92,6 +104,13 @@ test-block: $(TEST_BLOCK_BIN)
 
 test-full-forward: $(TEST_FF_BIN)
 	./$(TEST_FF_BIN)
+
+test-gemm-smoke: $(TEST_GEMM_BIN)
+
+test-layer-replay: $(TEST_REPLAY_BIN)
+
+test-final-head: $(TEST_FH_BIN)
+	./$(TEST_FH_BIN)
 
 test-m15: $(TEST_M15_BIN)
 	./$(TEST_M15_BIN)
@@ -301,6 +320,18 @@ bench-block: $(BENCH_BLOCK_BIN)
 $(TEST_FF_BIN): $(TEST_FF_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_FF_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+$(TEST_GEMM_BIN): $(TEST_GEMM_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_GEMM_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+$(TEST_REPLAY_BIN): $(TEST_REPLAY_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_REPLAY_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+$(TEST_FH_BIN): $(TEST_FH_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_FH_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
 
 $(TEST_TAIL_BIN): $(TEST_TAIL_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)

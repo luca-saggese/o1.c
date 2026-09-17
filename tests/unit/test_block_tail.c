@@ -179,7 +179,7 @@ int main(void) {
     for (int i = MID + 1; i < NLAYERS; i++) {
         hd_status s = hd_decoder_block(cur_in, (const float *)posd, maskd,
                                        &bw.blocks[i], secd, scratch, scr_bytes,
-                                       NULL, cur_out, S, NH, NKV, H, I, HD);
+                                       NULL, cur_out, S, NH, NKV, H, I, HD, NULL);
         if (s != HD_OK) { printf("FAIL: block %d: %s\n", i, hd_last_error()); return 1; }
         void *tmp = cur_out; cur_out = (void *)cur_in; cur_in = tmp;
     }

@@ -15,6 +15,7 @@
 
 #include "hidream.h"
 #include "safetensors.h"
+#include "gemm.h"
 
 /* How many representative tensors to fingerprint by default. */
 #define HD_WEIGHT_PROBE_MAX 32
@@ -90,6 +91,9 @@ typedef struct {
 
     hd_device_alloc *allocs;
     int64_t n_allocs;
+
+    /* M2 production GEMM runtime (persistent cuBLAS/cuBLASLt handles). */
+    struct hd_gemm_runtime *gemm;
 } hd_weight_store;
 
 /* Queries the CUDA device identity without allocating model memory. */

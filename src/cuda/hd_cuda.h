@@ -157,14 +157,6 @@ void hd_sched_z_next(const float *noise_dev, const float *denoised_dev,
 void hd_sched_vcond(const void *z_dev, const void *xp_dev, float sigma,
                     float *mo_dev, int n);
 
-/* ------------------------------------------------------------------ */
-/* cuBLAS cross-check helper (used by the harness, not the kernels)    */
-/* ------------------------------------------------------------------ */
-
-/* y[M,N] = x[M,K] @ W[N,K]^T in bf16 via cuBLAS BF16 GEMM. Returns HD_OK. */
-hd_status hd_cublas_gemm_bf16(const void *x_dev, const void *w_dev, void *y_dev,
-                              int M, int N, int K, int transpose_w);
-
 #ifdef __cplusplus
 }
 #endif
