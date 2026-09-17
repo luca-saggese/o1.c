@@ -19,7 +19,7 @@
  *   build/test_sanity_gen --fixture /tmp/sanity_seq --out out.png \
  *       --seed 123456 --steps 28 --model-dir models/dev
  */
-#include "cuda.h"
+#include "hd_cuda.h"
 #include "decode.h"
 #include "forward.h"
 #include "json.h"

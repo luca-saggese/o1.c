@@ -264,7 +264,7 @@ int main(void) {
     printf("  running hd_decoder_block ...\n");
     st = hd_decoder_block(xd, (const float *)posd, maskd, &bw, (const int64_t *)secd,
                           scratch, need, &ints, outd,
-                          seq, NH, NKV, H, I, HD);
+                          seq, NH, NKV, H, I, HD, NULL);
     CHECK(st == HD_OK, "hd_decoder_block ran without error");
     if (st != HD_OK) printf("  block error: %s\n", hd_last_error());
     cudaDeviceSynchronize();

@@ -16,7 +16,8 @@
 
 #include <stdint.h>
 
-#include "cuda.h"
+#include "hd_cuda.h"
+#include "hd_cudnn_sdpa.h"
 #include "weights.h"
 
 /* Returns the number of device bytes the forward needs for scratch buffers.
@@ -93,6 +94,7 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
                            void *scratch, int64_t scratch_bytes,
                            hd_block_internals *ints, void *out_dev,
                            int64_t seq, int heads, int kv_heads,
-                           int hidden, int ff_hidden, int head_dim);
+                           int hidden, int ff_hidden, int head_dim,
+                           hd_sdpa_plan *sdpa);
 
 #endif /* HD_BLOCK_H */

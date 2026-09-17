@@ -30,7 +30,8 @@
 
 #include <stdint.h>
 
-#include "cuda.h"
+#include "hd_cuda.h"
+#include "hd_cudnn_sdpa.h"
 #include "weights.h"
 #include "block.h"
 
@@ -77,6 +78,10 @@ typedef struct {
     void *xe_out;        /* [img, H] bf16 x_embedder proj2 out */
     void *block_scratch; /* decoder block scratch (persistent) */
     int64_t block_scratch_bytes;
+    /* cuDNN SDPA attention plan (M2 pre-baseline). Created once by the
+     * caller (hd_generate) for the fixed shape; NULL keeps the eager
+     * reference attention as the backend. */
+    hd_sdpa_plan *sdpa;
 } hd_forward_workspace;
 
 /* Optional diagnostics on the production path (same forward). */

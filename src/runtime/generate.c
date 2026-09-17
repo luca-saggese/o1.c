@@ -31,9 +31,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "cuda.h"
+#include "hd_cuda.h"
 #include "decode.h"
 #include "forward.h"
+#include "hd_image.h"
+#include "layout.h"
+#include "o1_timing.h"
 #include "scheduler.h"
 #include "sequence.h"
 #include "tokenizer.h"
@@ -51,6 +54,7 @@
 #define BOI_ID 151669
 #define PATCH 32
 #define T_EPS 1e-6f
+#define CONDITION_IMAGE_SIZE 384
 
 static void *dev_alloc(size_t bytes) {
     void *p = NULL;
@@ -89,6 +93,63 @@ static void pixel_unshuffle(const float *noise, int height, int width,
             }
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reference preprocessing (oracle pipeline.py ref path)               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Oracle reference preprocessing parity:
+ *   resize_pilimage(pil, max_size, PATCH)   (area-preserving, patch-aligned)
+ *   TENSOR_TRANSFORM: float32 [0,1] -> normalize [-1,1]
+ *   einops rearrange "C (H p1) (W p2) -> (H W) (C p1 p2)"
+ * Returns the resized grid dims via *grid_h/*grid_w (patches).
+ */
+static hd_status preprocess_ref(const hd_image *src, int max_size,
+                                float *patches_out, int *grid_h, int *grid_w) {
+    hd_image resized;
+    hd_status st = hd_image_resize(src, max_size, PATCH, &resized);
+    if (st != HD_OK) return st;
+    if (resized.width % PATCH || resized.height % PATCH) {
+        hd_image_free(&resized);
+        hd_set_error("generate: ref dims %dx%d not patch-aligned",
+                     resized.width, resized.height);
+        return HD_ERR_MISMATCH;
+    }
+    int gh = resized.height / PATCH, gw = resized.width / PATCH;
+    st = hd_image_to_patches(&resized, PATCH, patches_out);
+    if (st != HD_OK) {
+        hd_image_free(&resized);
+        return st;
+    }
+    /* TENSOR_TRANSFORM normalize [-1,1]: (x - 0.5) / 0.5 */
+    size_t n = (size_t)gh * gw * FF;
+    for (size_t i = 0; i < n; i++) patches_out[i] = patches_out[i] * 2.0f - 1.0f;
+    hd_image_free(&resized);
+    *grid_h = gh;
+    *grid_w = gw;
+    return HD_OK;
+}
+
+/*
+ * Oracle cond grid (pipeline.py): cond_img_size = 384 (K<=4), 288 (K<=8),
+ * 192 (else); calculate_dimensions(cond_img_size, ref ratio); then
+ * spatial_merge divides the grid (cond_h/cond_w in ref_geom are the
+ * post-merge grid). Returns cond grid in patches.
+ */
+static void ref_cond_grid(int K, int ref_w, int ref_h, int spatial_merge,
+                          int *cond_h, int *cond_w) {
+    int cond_img_size = CONDITION_IMAGE_SIZE;
+    if (K > 4 && K <= 8) cond_img_size = CONDITION_IMAGE_SIZE * 48 / 64;
+    else if (K > 8) cond_img_size = CONDITION_IMAGE_SIZE / 2;
+    int cw, ch;
+    hd_image_calc_dims(cond_img_size, (float)ref_w, (float)ref_h, PATCH,
+                       &cw, &ch);
+    *cond_w = cw / PATCH / spatial_merge;
+    *cond_h = ch / PATCH / spatial_merge;
+    if (*cond_w < 1) *cond_w = 1;
+    if (*cond_h < 1) *cond_h = 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -167,6 +228,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     size_t nimg = (size_t)IMG * FF;
 
     /* ---- tokenize prompt -> sequence ---- */
+    O1_TIMING_BEGIN("PROMPT_TOKENIZE");
     int64_t *ids = NULL;
     int text_len = 0;
     hd_status st = build_t2i_ids(req->prompt, &ids, &text_len);
@@ -182,6 +244,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         hd_set_error("generate: sequence: %s", hd_last_error());
         return st;
     }
+    O1_TIMING_END("PROMPT_TOKENIZE");
     int S = seq.S;
     if (seq.image_len != IMG) {
         hd_set_error("generate: sequence image_len %d != %d", seq.image_len, IMG);
@@ -190,6 +253,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     }
 
     /* ---- load weights ---- */
+    O1_TIMING_BEGIN("INPUT_PREPARE");
     hd_st_index idx;
     if (hd_st_index_load(model_dir, &idx) != HD_OK) {
         hd_set_error("generate: index: %s", hd_st_last_error());
@@ -229,6 +293,27 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     memset(&ws, 0, sizeof(ws));
     ws.hidden_a = wsbase;
     ws.block_scratch_bytes = scratch_bytes;
+
+    /* ---- cuDNN SDPA attention plan (M2 pre-baseline) ----
+     * Built once for the fixed shape (S, NH, NKV, HD) and reused for every
+     * denoise step. On failure we fall back to the eager reference backend
+     * (ws.sdpa stays NULL) rather than aborting generation. */
+    {
+        hd_sdpa_plan *plan = NULL;
+        float attn_scale = (float)(1.0 / sqrt((double)HD));
+        int rc = hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);
+#ifdef O1_DEBUG_TIMING
+        fprintf(stderr, "[timing] sdpa_create rc=%d S=%d -> %s\n", rc, S,
+                rc == 0 ? "SDPA ACTIVE" : "eager fallback");
+#endif
+        if (rc == 0) {
+            ws.sdpa = plan;
+        } else {
+            hd_set_error("generate: sdpa plan disabled (%s); using eager reference",
+                         hd_cuda_errbuf());
+            ws.sdpa = NULL;
+        }
+    }
 
     /* ---- stage device inputs ---- */
     void *posd = dev_alloc((size_t)3 * S * 4);
@@ -276,6 +361,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     }
 
     /* ---- native initial noise ---- */
+    O1_TIMING_BEGIN("INITIAL_NOISE");
     float *noise_h = malloc((size_t)3 * Hh * W * sizeof(float));
     float *z_h = malloc(nimg * sizeof(float));
     if (!noise_h || !z_h) { hd_set_error("generate: oom noise"); goto fail; }
@@ -285,6 +371,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     cudaMemcpy(z_prev_dev, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
     hd_f32_convert_bf16(z_prev_dev, z_prev_dev, (int)nimg);
     free(noise_h); free(z_h);
+    O1_TIMING_END("INITIAL_NOISE");
 
     /* ---- scheduler ---- */
     hd_scheduler sched;
@@ -294,6 +381,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
                      n_sigmas, req->steps + 1);
         goto fail;
     }
+    O1_TIMING_END("INPUT_PREPARE");
 
     /* ---- denoising chain ---- */
     float *noise_step = malloc(nimg * sizeof(float));
@@ -304,6 +392,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
      * draws randn_like(z) in sequence). */
     hd_torch_rng step_rng;
     hd_torch_rng_seed(&step_rng, req->seed + 1);
+    O1_TIMING_BEGIN("DENOISE_TOTAL");
     for (int i = 0; i < req->steps; i++) {
         float t_pixeldit = 1.0f - sched.sigmas[i];
         float sigma = sched.sigmas[i];
@@ -352,8 +441,10 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         }
         cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
 
+        O1_TIMING_BEGIN_GPU("SCHEDULER");
         st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev, s_noise,
                                z_next_dev, (int)nimg, scratch);
+        O1_TIMING_END_GPU("SCHEDULER");
         if (st != HD_OK) {
             hd_set_error("generate: scheduler step %d: %s", i, hd_last_error());
             free(noise_step);
@@ -363,9 +454,11 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
 
         if (req->progress_cb) req->progress_cb(i + 1, req->steps, req->progress_user);
     }
+    O1_TIMING_END("DENOISE_TOTAL");
     free(noise_step);
 
     /* ---- decode final z to RGB ---- */
+    O1_TIMING_BEGIN("OUTPUT_RECONSTRUCTION");
     void *z_bf16_h = malloc(nimg * 2);
     z_final = malloc(nimg * sizeof(float));
     rgb = malloc((size_t)Hh * W * 3);
@@ -403,6 +496,8 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
 
     hd_decode_to_rgb(z_final, grid_h, grid_w, PATCH, 3, rgb);
     free(z_final);
+    z_final = NULL;   /* avoid double-free in the fail cleanup path */
+    O1_TIMING_END("OUTPUT_RECONSTRUCTION");
 
     *out_rgb = rgb;
     *out_w = W;

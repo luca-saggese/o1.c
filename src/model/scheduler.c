@@ -10,7 +10,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "cuda.h"
+#include "hd_cuda.h"
 
 /* torch.linalg-style 2x2 solve (fp64), returns determinant; singular -> 0. */
 static double hd_solve2x2(double a, double b, double c, double d,

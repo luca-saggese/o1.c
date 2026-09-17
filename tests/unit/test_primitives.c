@@ -18,7 +18,7 @@
  * no Python oracle is invoked.
  */
 
-#include "cuda.h"
+#include "hd_cuda.h"
 #include "json.h"
 #include "hidream.h"
 #include "safetensors.h"

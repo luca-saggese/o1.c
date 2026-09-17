@@ -6,10 +6,17 @@
  * Not part of the public ABI; consumed only by src/cuda/*.cu.
  */
 
-#include "cuda.h"
+#include "hd_cuda.h"
 
-/* Shared error buffer (defined in support.cu). */
+/* Shared error buffer (defined in support.cu). Must be inside extern "C"
+ * so nvcc does not mangle the symbol (C callers link against it). */
+#ifdef __cplusplus
+extern "C" {
+#endif
 char *hd_cuda_errbuf(void);
+#ifdef __cplusplus
+}
+#endif
 
 /* BF16 <-> FP32 (host + device). */
 __device__ __forceinline__ float hd_dev_bf16_to_f32(uint16_t b) {

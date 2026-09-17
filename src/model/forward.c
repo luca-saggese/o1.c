@@ -33,9 +33,10 @@
 
 #include <cuda_runtime.h>
 
-#include "cuda.h"
+#include "hd_cuda.h"
 #include "weights.h"
 #include "block.h"
+#include "o1_timing.h"
 
 /* ------------------------------------------------------------------ */
 /* Binding resolution                                                  */
@@ -155,7 +156,11 @@ static int64_t forward_layout_offsets(int64_t seq, int text_len, int img_tokens,
     out_off[9]  = o; o += 1 * 4;                             /* 9 t_scaled  */
     out_off[10] = o; o += (int64_t)img_tokens * 1024 * 2;    /* 10 xe_stage */
     out_off[11] = o; o += (int64_t)img_tokens * hidden * 2;  /* 11 xe_out   */
-    o = (o + 7) & ~((int64_t)7);
+    /* Align the block scratch sub-arena to 256 bytes: cuDNN SDPA requires
+     * >=16B alignment on q/k/v/out, and the block's internal offsets are
+     * 16B-aligned relative to this base. The parent arena (cudaMalloc) is
+     * 256B-aligned, so aligning this offset keeps every child aligned. */
+    o = (o + 255) & ~((int64_t)255);
     out_off[12] = o;                                         /* 12 block_sc */
     int64_t bs = hd_decoder_block_scratch_bytes(seq, heads, kv_heads,
                                                 hidden, ff_hidden, head_dim);
@@ -196,6 +201,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
                      void *out_dev,
                      void *stream) {
     (void)stream; /* single stable compute stream for M1.4 */
+    O1_TIMING_BEGIN_GPU("TRANSFORMER_TOTAL");
     if (!bw || !ws || !input_ids || !pos_f32 || !mask_dev || !vinputs ||
         !timestep || !sec_dev || !out_dev) {
         hd_set_error("forward: null argument");
@@ -240,6 +246,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* ------------------------------------------------------------------ */
     /* Step 2: t_emb = t_embedder1(timestep), [H] bf16                    */
     /* ------------------------------------------------------------------ */
+    O1_TIMING_BEGIN_GPU("EMBEDDING");
     hd_scale_f32(timestep, t_scaled, 1000.0f, 1);
     hd_timestep_embed(t_scaled, freq_f32, 1, 256);
     hd_f32_convert_bf16(freq_f32, freq_bf16, 256);
@@ -285,6 +292,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
     cudaMemcpy(hidden_a, h_text, (size_t)T * H * 2, cudaMemcpyDeviceToDevice);
     cudaMemcpy((uint8_t *)hidden_a + (size_t)T * H * 2, xe_out,
                (size_t)I * H * 2, cudaMemcpyDeviceToDevice);
+    O1_TIMING_END_GPU("EMBEDDING");
     if (diag && diag->after_block_0_input)
         cudaMemcpy(diag->after_block_0_input, hidden_a, (size_t)S * H * 2,
                    cudaMemcpyDeviceToDevice);
@@ -298,13 +306,17 @@ hd_status hd_forward(const hd_forward_binding *bw,
     const void *cur_in  = hidden_a;
     void *cur_out       = hidden_b;
     int n = bw->n_layers;
+    O1_TIMING_BEGIN_GPU("BLOCKS_TOTAL");
     for (int i = 0; i < n; i++) {
+        O1_TIMING_BEGIN_GPU("BLOCK_SINGLE");
         hd_status s = hd_decoder_block(cur_in, pos_f32, mask_dev,
                                        &bw->blocks[i], sec_dev,
                                        scratch, ws->block_scratch_bytes,
                                        NULL, cur_out,
                                        seq, heads, kv_heads,
-                                       hidden, ff_hidden, head_dim);
+                                       hidden, ff_hidden, head_dim,
+                                       ws->sdpa);
+        O1_TIMING_END_GPU("BLOCK_SINGLE");
         if (s != HD_OK) return s;
 
         if (diag) {
@@ -324,10 +336,12 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* After swapping following the final write, cur_in holds the last block
      * output. final_hidden = cur_in. */
     void *final_hidden = (void *)cur_in;
+    O1_TIMING_END_GPU("BLOCKS_TOTAL");
 
     /* ------------------------------------------------------------------ */
     /* Step 7: final RMSNorm                                              */
     /* ------------------------------------------------------------------ */
+    O1_TIMING_BEGIN_GPU("FINAL_NORM_HEAD");
     if (diag && diag->before_final_norm)
         cudaMemcpy(diag->before_final_norm, final_hidden, (size_t)S * H * 2,
                    cudaMemcpyDeviceToDevice);
@@ -341,6 +355,8 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* ------------------------------------------------------------------ */
     hd_linear(norm_out, bw->fl_w, bw->fl_b, head_out, S, 3072, H, 1);
     cudaMemcpy(out_dev, head_out, (size_t)S * 3072 * 2, cudaMemcpyDeviceToDevice);
+    O1_TIMING_END_GPU("FINAL_NORM_HEAD");
+    O1_TIMING_END_GPU("TRANSFORMER_TOTAL");
     if (diag && diag->after_final_head)
         cudaMemcpy(diag->after_final_head, out_dev, (size_t)S * 3072 * 2,
                    cudaMemcpyDeviceToDevice);

@@ -1,6 +1,7 @@
 #include "weights.h"
 #include "sha256.h"
-#include "cuda.h"
+#include "hd_cuda.h"
+#include "o1_timing.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -270,6 +271,7 @@ hd_status hd_device_info(int device_id, hd_weight_store *out) {
 
 hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
                                int device_id, hd_weight_store *out) {
+    O1_TIMING_BEGIN("MODEL_LOAD");
     hd_weight_store info;
     hd_status st = hd_device_info(device_id, &info);
     if (st != HD_OK) return st;
@@ -354,6 +356,7 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
     e = cudaDeviceSynchronize();
     if (e != cudaSuccess) { w_err("cudaDeviceSynchronize: %s", cudaGetErrorString(e)); st = HD_ERR_IO; goto fail; }
 
+    O1_TIMING_END("MODEL_LOAD");
     *out = info;
     return HD_OK;
 

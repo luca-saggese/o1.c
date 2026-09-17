@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "hidream.h"
+#include "../image/layout.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -65,12 +66,6 @@ typedef struct {
     const char *path;     /* image path (native decode) */
     hd_reference_role role;
 } hd_reference_image;
-
-/* Layout bbox in relative xxyy coordinates [0,1] (oracle parse_layout_bboxes). */
-typedef struct {
-    float x1, y1, x2, y2;
-    const char *text;     /* optional label */
-} hd_layout_condition;
 
 /* Skeleton/openpose metadata (JSON string, oracle load_layout_bboxes style). */
 typedef struct {

@@ -1,5 +1,5 @@
-#ifndef HD_CUDA_H
-#define HD_CUDA_H
+#ifndef HD_CUDA_PROJECT_H
+#define HD_CUDA_PROJECT_H
 
 /*
  * Public C ABI for the M1.2 reference CUDA transformer primitives.
@@ -169,4 +169,4 @@ hd_status hd_cublas_gemm_bf16(const void *x_dev, const void *w_dev, void *y_dev,
 }
 #endif
 
-#endif /* HD_CUDA_H */
+#endif /* HD_CUDA_PROJECT_H */

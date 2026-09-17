@@ -1,6 +1,7 @@
 #include "hidream.h"
 #include "generate.h"
 #include "json.h"
+#include "o1_timing.h"
 #include "png_wrap.h"
 #include "request.h"
 #include "safetensors.h"
@@ -91,6 +92,7 @@ static int write_metadata(const char *png_path, const hd_generation_request *req
 }
 
 int main(int argc, char **argv) {
+    O1_TIMING_BEGIN("TOTAL_PROCESS");
     const char *profile = "dev";
     const char *config_dir = "config";
     const char *model_dir = NULL;
@@ -159,6 +161,7 @@ int main(int argc, char **argv) {
 
     /* ---- M1.8 production generation path ---- */
     if (prompt) {
+        O1_TIMING_BEGIN("MODEL_STARTUP");
         hd_generation_request req;
         memset(&req, 0, sizeof(req));
         req.prompt = prompt;
@@ -199,17 +202,21 @@ int main(int argc, char **argv) {
                req.width, req.height, req.steps, req.profile,
                (unsigned long long)req.seed, hd_scheduler_name(req.scheduler));
 
+        O1_TIMING_BEGIN("REQUEST_TOTAL");
         unsigned char *rgb = NULL;
         int ow = 0, oh = 0;
         st = hd_generate(&req, dir, device_id, &rgb, &ow, &oh);
+        O1_TIMING_END("REQUEST_TOTAL");
         if (st != HD_OK) {
             fprintf(stderr, "FAIL: generation: %s\n", hd_last_error());
             hd_profile_free(&p);
             return 1;
         }
 
+        O1_TIMING_BEGIN("IMAGE_ENCODE_WRITE");
         int rc = hd_png_write_rgb(output, ow, oh, rgb, "hidream",
                                   hd_mode_name(req.mode));
+        O1_TIMING_END("IMAGE_ENCODE_WRITE");
         if (rc != 0) {
             fprintf(stderr, "FAIL: PNG write %s\n", output);
             free(rgb);
@@ -238,6 +245,12 @@ int main(int argc, char **argv) {
         }
         if (write_metadata(output, &req, engine_commit[0] ? engine_commit : NULL) != 0)
             fprintf(stderr, "warn: metadata write failed\n");
+
+        O1_TIMING_END("MODEL_STARTUP");
+        O1_TIMING_END("TOTAL_PROCESS");
+#ifdef O1_DEBUG_TIMING
+        o1_timing_report("artifacts/m2/prebaseline/native_timing.json");
+#endif
 
         printf("PASS: generation %s (%dx%d)\n", output, ow, oh);
         hd_profile_free(&p);

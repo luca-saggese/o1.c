@@ -198,7 +198,7 @@ int main(void) {
                cudaMemcpyHostToDevice);
     hd_status st = hd_decoder_block(bufA, (const float *)posd, maskd,
                                     &bw.blocks[18], secd, scratch, scr_bytes,
-                                    NULL, bufB, S, NH, NKV, H, I, HD);
+                                    NULL, bufB, S, NH, NKV, H, I, HD, NULL);
     if (st != HD_OK) { printf("FAIL: block 18: %s\n", hd_last_error()); return 1; }
     cudaDeviceSynchronize();
     cudaMemcpy(host, bufB, shb, cudaMemcpyDeviceToHost);

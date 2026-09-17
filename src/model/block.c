@@ -40,6 +40,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <cuda_runtime.h>
@@ -102,29 +103,24 @@ hd_status hd_block_resolve(const hd_weight_store *wstore, int layer_idx,
 
 int64_t hd_decoder_block_scratch_bytes(int64_t seq, int heads, int kv_heads,
                                        int hidden, int ff_hidden, int head_dim) {
-    /* bf16 element count */
-    int64_t e = 0;
-    e += seq * hidden;                      /* in_ln       */
-    e += seq * heads * head_dim;            /* qp, q, qr   */
-    e += seq * heads * head_dim;
-    e += seq * heads * head_dim;
-    e += seq * kv_heads * head_dim;         /* kp, k, kr   */
-    e += seq * kv_heads * head_dim;
-    e += seq * kv_heads * head_dim;
-    e += seq * kv_heads * head_dim;         /* vp, v       */
-    e += seq * kv_heads * head_dim;
-    e += (int64_t)heads * seq * seq;        /* scores      */
-    e += (int64_t)heads * seq * seq;        /* probs       */
-    e += seq * heads * head_dim;            /* attn_sm     */
-    e += seq * hidden;                      /* attn_m, attn_h, attn_r */
-    e += seq * hidden;
-    e += seq * hidden;
-    e += seq * hidden;                      /* post        */
-    e += seq * ff_hidden;                   /* gate, up, swi */
-    e += seq * ff_hidden;
-    e += seq * ff_hidden;
-    e += seq * hidden;                      /* mlp, mlp_r  */
-    e += seq * hidden;
+    /* bf16 element count, with 8-element (16-byte) alignment between every
+     * region to match the offset layout in hd_decoder_block (cuDNN SDPA
+     * requires >=16B alignment on q/k/v/out). */
+    int64_t S_H = seq * heads * head_dim;
+    int64_t S_K = seq * kv_heads * head_dim;
+    int64_t S_S = (int64_t)heads * seq * seq;
+    int64_t S_I = seq * ff_hidden;
+    int64_t S_HID = seq * hidden;
+    int64_t cur = 0;
+    int64_t regs[21] = { S_HID, S_H, S_H, S_H, S_K, S_K, S_K, S_K, S_K,
+                         S_S, S_S, S_H, S_H, S_HID, S_HID, S_HID,
+                         S_I, S_I, S_I, S_HID, S_HID };
+    for (int i = 0; i < 21; i++) {
+        cur = (cur + 7) & ~(int64_t)7;
+        cur += regs[i];
+    }
+    cur = (cur + 7) & ~(int64_t)7;
+    int64_t e = cur;
 
     int64_t bytes = e * (int64_t)sizeof(uint16_t);
     bytes += 2 * seq * head_dim * (int64_t)sizeof(float); /* fp32 cos/sin */
@@ -143,7 +139,8 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
                            void *scratch, int64_t scratch_bytes,
                            hd_block_internals *ints, void *out_dev,
                            int64_t seq, int heads, int kv_heads,
-                           int hidden, int ff_hidden, int head_dim) {
+                           int hidden, int ff_hidden, int head_dim,
+                           hd_sdpa_plan *sdpa) {
     if (!in_dev || !pos_dev || !mask_dev || !bw ||
         !sec_dev || !scratch || !out_dev) {
         hd_set_error("block: null argument");
@@ -174,26 +171,31 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     int64_t S_HID = seq * hidden;
 
     int64_t cur = 0;
-    int64_t o_ln   = cur; cur += S_HID;
-    int64_t o_qp   = cur; cur += S_H;
-    int64_t o_q    = cur; cur += S_H;
-    int64_t o_qr   = cur; cur += S_H;
-    int64_t o_kp   = cur; cur += S_K;
-    int64_t o_k    = cur; cur += S_K;
-    int64_t o_kr   = cur; cur += S_K;
-    int64_t o_vp   = cur; cur += S_K;
-    int64_t o_v    = cur; cur += S_K;
-    int64_t o_sco  = cur; cur += S_S;
-    int64_t o_prb  = cur; cur += S_S;
-    int64_t o_as   = cur; cur += S_H;
-    int64_t o_ah   = cur; cur += S_HID;
-    int64_t o_ar   = cur; cur += S_HID;
-    int64_t o_post = cur; cur += S_HID;
-    int64_t o_gate = cur; cur += S_I;
-    int64_t o_up   = cur; cur += S_I;
-    int64_t o_swi  = cur; cur += S_I;
-    int64_t o_mlp  = cur; cur += S_HID;
-    int64_t o_mlpr = cur; cur += S_HID;
+    /* All offsets are aligned to 8 bf16 elements (16 bytes) so that buffers
+     * handed to cuDNN SDPA (q/k/v/out) satisfy the backend's >=16B alignment
+     * requirement. Eager kernels only need 2-byte alignment, so this is a
+     * strict superset. */
+    int64_t o_ln   = cur; cur += S_HID; cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_qp   = cur; cur += S_H;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_q    = cur; cur += S_H;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_qr   = cur; cur += S_H;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_kp   = cur; cur += S_K;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_k    = cur; cur += S_K;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_kr   = cur; cur += S_K;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_vp   = cur; cur += S_K;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_v    = cur; cur += S_K;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_sco  = cur; cur += S_S;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_prb  = cur; cur += S_S;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_as   = cur; cur += S_H;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_sdpa = cur; cur += S_H;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_ah   = cur; cur += S_HID; cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_ar   = cur; cur += S_HID; cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_post = cur; cur += S_HID; cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_gate = cur; cur += S_I;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_up   = cur; cur += S_I;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_swi  = cur; cur += S_I;   cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_mlp  = cur; cur += S_HID; cur = (cur + 7) & ~(int64_t)7;
+    int64_t o_mlpr = cur; cur += S_HID; cur = (cur + 7) & ~(int64_t)7;
 
     uint8_t *b = scratch;
     size_t off(size_t ee) { return ee * sizeof(uint16_t); }
@@ -209,6 +211,7 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     void *scores = b + off((size_t)o_sco);
     void *probs  = b + off((size_t)o_prb);
     void *as     = b + off((size_t)o_as);
+    void *sdpa_out = b + off((size_t)o_sdpa);
     void *ah     = b + off((size_t)o_ah);
     void *ar     = b + off((size_t)o_ar);
     void *post   = b + off((size_t)o_post);
@@ -265,13 +268,27 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     hd_apply_rotary(qr, cosf, sinf, q, H, S, D);
     hd_apply_rotary(kr, cosf, sinf, k, KV, S, D);
 
-    /* 7. eager attention -> out [S,H,D] seq-major, already contiguous
+    /* 7. attention -> out [S,H,D] seq-major, already contiguous
      *    as [S, H*D] (torch .view(S,H,D) layout) ready for o_proj.
-     *    The eager kernel internally transposes head-major to seq-major, so
-     *    NO head_merge is needed here (see attn.cu hd_attn_transpose_kernel
-     *    and contract 5.4: attn_out [S,H,D]).                         */
-    hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
-                       H, KV, S, D, scaling);
+     *
+     *    Backend selection:
+     *      - cuDNN SDPA (M2 pre-baseline): hd_sdpa_execute writes the
+     *        head-major [H,S,D] output into `sdpa_out`, then hd_head_merge
+     *        transposes it to seq-major [S,H*D] in `as`. The plan is built
+     *        once by the caller (hd_generate) for the fixed shape.
+     *      - eager reference (default): hd_attention_eager internally
+     *        transposes head-major to seq-major, writing `as` directly.   */
+    if (sdpa) {
+        int rc = hd_sdpa_execute(sdpa, q, k, v, mask_dev, sdpa_out, 0);
+        if (rc != 0) {
+            hd_set_error("block: hd_sdpa_execute failed: %s", hd_cuda_errbuf());
+            return HD_ERR_RUNTIME;
+        }
+        hd_head_merge(sdpa_out, as, S, H, D);
+    } else {
+        hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
+                           H, KV, S, D, scaling);
+    }
 
     /* 8. o_proj over [S, H*D] contiguous attention output. Note: the
      *    eager kernel's internal transpose (attn.cu) already produces the
