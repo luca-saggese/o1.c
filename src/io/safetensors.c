@@ -1,5 +1,6 @@
 #include "safetensors.h"
 #include "json.h"
+#include "o1_timing.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -160,6 +161,7 @@ static hd_status st_parse_shard(const char *dir, const char *shard,
 }
 
 hd_status hd_st_index_load(const char *dir, hd_st_index *out) {
+    O1_TIMING_BEGIN("METADATA_PARSE");
     memset(out, 0, sizeof(*out));
     out->dir = st_strdup(dir);
 
@@ -215,6 +217,7 @@ hd_status hd_st_index_load(const char *dir, hd_st_index *out) {
     if (st != HD_OK) { hd_st_index_free(out); return st; }
 
     qsort(out->tensors, (size_t)out->n_tensors, sizeof(*out->tensors), st_cmp);
+    O1_TIMING_END("METADATA_PARSE");
     return HD_OK;
 }
 

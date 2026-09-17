@@ -27,6 +27,9 @@ void o1_timing_begin_gpu(const char *name);
 void o1_timing_end_gpu(const char *name);
 void o1_timing_add(const char *name, double seconds);
 void o1_timing_add_gpu(const char *name, double seconds);
+void o1_timing_counter_add(const char *name, double value);
+void o1_timing_counter_set(const char *name, double value);
+double o1_timing_region_seconds(const char *name);
 void o1_timing_report(const char *json_path);
 
 #define O1_TIMING_BEGIN(name) o1_timing_begin_cpu(name)
@@ -35,6 +38,8 @@ void o1_timing_report(const char *json_path);
 #define O1_TIMING_END_GPU(name) o1_timing_end_gpu(name)
 #define O1_TIMING_ADD(name, value) o1_timing_add(name, value)
 #define O1_TIMING_ADD_GPU(name, value) o1_timing_add_gpu(name, value)
+#define O1_TIMING_COUNTER_ADD(name, value) o1_timing_counter_add(name, value)
+#define O1_TIMING_COUNTER_SET(name, value) o1_timing_counter_set(name, value)
 
 #else /* !O1_DEBUG_TIMING */
 
@@ -44,6 +49,8 @@ void o1_timing_report(const char *json_path);
 #define O1_TIMING_END_GPU(name) ((void)0)
 #define O1_TIMING_ADD(name, value) ((void)0)
 #define O1_TIMING_ADD_GPU(name, value) ((void)0)
+#define O1_TIMING_COUNTER_ADD(name, value) ((void)0)
+#define O1_TIMING_COUNTER_SET(name, value) ((void)0)
 
 #endif /* O1_DEBUG_TIMING */
 

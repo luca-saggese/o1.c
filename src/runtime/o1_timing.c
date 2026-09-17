@@ -164,6 +164,34 @@ void o1_timing_add_gpu(const char *name, double seconds) {
     r->gpu_count++;
 }
 
+void o1_timing_counter_add(const char *name, double value) {
+    o1_timing_region *r = find_or_create(name);
+    if (r == NULL) {
+        return;
+    }
+    r->cpu_seconds += value;
+    r->cpu_count++;
+}
+
+void o1_timing_counter_set(const char *name, double value) {
+    o1_timing_region *r = find_or_create(name);
+    if (r == NULL) {
+        return;
+    }
+    r->cpu_seconds = value;
+    r->cpu_count = 1;
+}
+
+double o1_timing_region_seconds(const char *name) {
+    int i;
+    for (i = 0; i < g_region_count; i++) {
+        if (strcmp(g_regions[i].name, name) == 0) {
+            return g_regions[i].cpu_seconds;
+        }
+    }
+    return 0.0;
+}
+
 static void fold_gpu_events(void) {
     int i;
     for (i = 0; i < g_event_count; i++) {
