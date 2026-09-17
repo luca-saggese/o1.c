@@ -1,8 +1,7 @@
 # M1-post — Final Storyboard Upstream Audit
 
-Date: 2026-09-17
-Scope: Final determination of official HiDream-O1-Image storyboard semantics
-before M1-post closes. Supersedes the open question in
+Date: 2026-09-17. Scope: Final determination of official HiDream-O1-Image
+storyboard semantics before M1-post closes. Supersedes the open question in
 `docs/M1_POST_MODE_CONTRACTS.md` §6 and
 `artifacts/m1post/audit/F_PROMPT_STORYBOARD_AUDIT.md`.
 
@@ -39,7 +38,7 @@ orchestration over repeated generations (C).
   long-text rendering, instruction editing, subject-driven personalization,
   and **storyboard generation** in a single architecture." (advertised only;
   no usage section for it).
-- `models/dev/README.md` — **no** storyboard mention (grep: 0 matches). The
+- `models/dev/README.md` — **no** storyboard mention (grep: 0 matches); the
   dev card documents only text-to-image + the Prompt-Refine agent.
 
 ### 2. Upstream GitHub repo (HiDream-ai/HiDream-O1-Image)
@@ -141,14 +140,12 @@ without inventing any new mechanism.
 
 ## Gaps and uncertainties
 
-- The report does not specify a canonical panel count or grid aspect ratio for
-  storyboard; its examples use 9 panels. The repo's 3-panel scenario is a
-  deliberate subset, not an upstream-documented count.
-- No upstream code validates or post-processes the panel grid (no slicing of
-  the output image into panels is documented); the grid is produced as-is by
-  the model.
-- The report's Figure 3/Figure 9 images were not machine-verified for panel
-  count; the text examples (9 panels) are the authoritative format reference.
+- The report does not specify a canonical panel count or grid aspect ratio;
+  its examples use 9 panels. The repo's 3-panel scenario is a deliberate
+  subset, not an upstream-documented count.
+- No upstream code validates/post-processes the panel grid; the grid is
+  produced as-is by the model. Figure 3/Figure 9 images were not
+  machine-verified for panel count; the text examples are authoritative.
 - Searched: GitHub code search (all branches), both READMEs, both app.py,
   both inference.py, prompt_agent.py, prompt_agent_v2.py, models/pipeline.py,
   both HF model cards, HF Spaces app.py, and the full technical report text.
