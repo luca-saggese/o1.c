@@ -2,13 +2,23 @@
 #include "sha256.h"
 #include "hd_cuda.h"
 #include "o1_timing.h"
+#include "gguf.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+
 #include <cuda_runtime.h>
+
+/* M3 loader tuning. */
+#define HD_LOADER_STAGE_SLOTS 4
+#define HD_LOADER_STAGE_BYTES (128u * 1024u * 1024u) /* 128 MiB per slot */
+#define HD_LOADER_ALIGN 256u
 
 static char g_w_error[512] = "";
 
@@ -269,6 +279,39 @@ hd_status hd_device_info(int device_id, hd_weight_store *out) {
     return HD_OK;
 }
 
+/* ------------------------------------------------------------------ */
+/* M3 pipelined loader                                                 */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int fd;
+    char shard[128];
+} hd_shard_fd;
+
+typedef struct {
+    const hd_st_tensor *t;
+    int64_t orig_idx;
+} hd_io_entry;
+
+static int tensor_io_cmp(const void *a, const void *b) {
+    const hd_io_entry *x = a;
+    const hd_io_entry *y = b;
+    int c = strcmp(x->t->shard, y->t->shard);
+    if (c) return c;
+    if (x->t->data_begin < y->t->data_begin) return -1;
+    if (x->t->data_begin > y->t->data_begin) return 1;
+    return 0;
+}
+
+static int64_t hd_dev_nbytes(const hd_st_tensor *t) {
+    return (t->dtype == HD_DTYPE_F32) ? t->numel * (int64_t)sizeof(uint16_t)
+                                      : t->nbytes;
+}
+
+static int64_t hd_align_up(int64_t v, int64_t a) {
+    return (v + a - 1) & ~(a - 1);
+}
+
 hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
                                int device_id, hd_weight_store *out) {
     O1_TIMING_BEGIN("MODEL_LOAD");
@@ -283,78 +326,169 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
     info.allocs = calloc((size_t)idx->n_tensors, sizeof(hd_device_alloc));
     if (!info.allocs) { w_err("oom alloc table"); return HD_ERR_OOM; }
 
-    uint8_t *host = NULL;
-    int64_t host_cap = 0;
-
+    /* ---- pass 1: placement plan (no I/O, no CUDA alloc) ---- */
+    int64_t arena_bytes = 0;
+    int64_t max_raw = 0, max_dev = 0;
     for (int64_t i = 0; i < idx->n_tensors; i++) {
         const hd_st_tensor *t = &idx->tensors[i];
+        int64_t dev = hd_dev_nbytes(t);
+        info.allocs[i].nbytes = dev;
+        snprintf(info.allocs[i].name, sizeof(info.allocs[i].name), "%s", t->name);
+        arena_bytes = hd_align_up(arena_bytes, HD_LOADER_ALIGN) + dev;
+        if (t->nbytes > max_raw) max_raw = t->nbytes;
+        if (dev > max_dev) max_dev = dev;
+    }
+    arena_bytes = hd_align_up(arena_bytes, HD_LOADER_ALIGN);
 
-        if (t->nbytes > host_cap) {
-            uint8_t *nh = realloc(host, (size_t)t->nbytes);
-            if (!nh) { w_err("oom host staging buffer"); st = HD_ERR_OOM; goto fail; }
-            host = nh;
-            host_cap = t->nbytes;
+    /* ---- one aligned CUDA arena ---- */
+    O1_TIMING_BEGIN("CUDA_ALLOC");
+    e = cudaMalloc(&info.arena_ptr, (size_t)arena_bytes);
+    O1_TIMING_END("CUDA_ALLOC");
+    if (e != cudaSuccess) {
+        w_err("cudaMalloc arena %lld bytes: %s", (long long)arena_bytes,
+              cudaGetErrorString(e));
+        st = HD_ERR_OOM;
+        goto fail;
+    }
+    info.arena_bytes = arena_bytes;
+    O1_TIMING_COUNTER_SET("cuda_malloc_calls", 1);
+
+    /* ---- pinned staging + dedicated nonblocking upload stream ---- */
+    uint8_t *raw_slot = NULL;
+    uint8_t *dev_slot[2] = {NULL, NULL};
+    cudaEvent_t slot_ev[2] = {NULL, NULL};
+    e = cudaMallocHost(&raw_slot, (size_t)max_raw);
+    if (e != cudaSuccess) { w_err("cudaMallocHost raw: %s", cudaGetErrorString(e)); st = HD_ERR_OOM; goto fail; }
+    e = cudaMallocHost(&dev_slot[0], (size_t)max_dev);
+    if (e != cudaSuccess) { w_err("cudaMallocHost dev0: %s", cudaGetErrorString(e)); st = HD_ERR_OOM; goto fail; }
+    e = cudaMallocHost(&dev_slot[1], (size_t)max_dev);
+    if (e != cudaSuccess) { w_err("cudaMallocHost dev1: %s", cudaGetErrorString(e)); st = HD_ERR_OOM; goto fail; }
+    e = cudaStreamCreateWithFlags(&info.upload_stream, cudaStreamNonBlocking);
+    if (e != cudaSuccess) { w_err("cudaStreamCreate: %s", cudaGetErrorString(e)); st = HD_ERR_OOM; goto fail; }
+    cudaEventCreateWithFlags(&slot_ev[0], cudaEventDisableTiming);
+    cudaEventCreateWithFlags(&slot_ev[1], cudaEventDisableTiming);
+
+    /* ---- open each shard once, keep the fd ---- */
+    int n_shards = 0;
+    hd_shard_fd shards[16];
+    for (int64_t i = 0; i < idx->n_tensors; i++) {
+        const char *s = idx->tensors[i].shard;
+        int found = 0;
+        for (int k = 0; k < n_shards; k++) {
+            if (strcmp(shards[k].shard, s) == 0) { found = 1; break; }
         }
+        if (found) continue;
+        if (n_shards >= 16) { w_err("too many shards"); st = HD_ERR_MANIFEST; goto fail; }
+        char path[2048];
+        snprintf(path, sizeof(path), "%s/%s", idx->dir, s);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) { w_err("open %s: %s", path, strerror(errno)); st = HD_ERR_IO; goto fail; }
+        snprintf(shards[n_shards].shard, sizeof(shards[n_shards].shard), "%s", s);
+        shards[n_shards].fd = fd;
+        n_shards++;
+    }
 
-        st = hd_st_read_tensor(idx, t, host);
-        if (st != HD_OK) { w_err("%s", hd_st_last_error()); goto fail; }
+    /* ---- pass 2: sequential pread + async H2D, double-buffered ---- */
+    hd_io_entry *order = malloc((size_t)idx->n_tensors * sizeof(*order));
+    if (!order) { w_err("oom order table"); st = HD_ERR_OOM; goto fail; }
+    for (int64_t i = 0; i < idx->n_tensors; i++) {
+        order[i].t = &idx->tensors[i];
+        order[i].orig_idx = i;
+    }
+    qsort(order, (size_t)idx->n_tensors, sizeof(*order), tensor_io_cmp);
 
-        /* The engine computes in BF16 (M1_NUMERICAL_CONTRACT: "BF16 forward;
-         * weights loaded FP32"). Cast FP32 weights to BF16 on upload so the
-         * primitive ABI (which consumes BF16 dev buffers) sees the same
-         * values as the oracle's bf16-loaded weights. Non-FP32 tensors are
-         * uploaded as-is. */
-        int64_t dev_nbytes = t->nbytes;
-        if (t->dtype == HD_DTYPE_F32) {
-            dev_nbytes = t->numel * (int64_t)sizeof(uint16_t);
+    O1_TIMING_BEGIN("FILE_READ");
+    int64_t arena_off = 0;
+    int cur = 0;
+    for (int64_t i = 0; i < idx->n_tensors; i++) {
+        const hd_st_tensor *t = order[i].t;
+        int64_t oi = order[i].orig_idx;
+        int fd = -1;
+        for (int k = 0; k < n_shards; k++) {
+            if (strcmp(shards[k].shard, t->shard) == 0) { fd = shards[k].fd; break; }
         }
+        if (fd < 0) { w_err("no fd for %s", t->shard); st = HD_ERR_IO; goto fail; }
 
-        void *dev = NULL;
-        e = cudaMalloc(&dev, (size_t)dev_nbytes);
-        if (e != cudaSuccess) {
-            w_err("cudaMalloc %lld bytes for %s: %s", (long long)dev_nbytes,
-                  t->name, cudaGetErrorString(e));
-            st = HD_ERR_OOM;
-            goto fail;
-        }
-        if (t->dtype == HD_DTYPE_F32) {
-            /* fp32 -> bf16 host-side cast, then upload */
-            uint8_t *cast = malloc((size_t)dev_nbytes);
-            if (!cast) {
-                w_err("oom bf16 cast buffer for %s", t->name);
-                cudaFree(dev);
-                st = HD_ERR_OOM;
+        /* Wait for this slot's previous upload before overwriting it. */
+        if (i >= 2) cudaEventSynchronize(slot_ev[cur]);
+
+        /* pread in a loop: a single syscall is capped at ~2 GiB. */
+        size_t got = 0;
+        while (got < (size_t)t->nbytes) {
+            ssize_t rd = pread(fd, (uint8_t *)raw_slot + got,
+                               (size_t)t->nbytes - got,
+                               (off_t)t->data_begin + (off_t)got);
+            if (rd <= 0) {
+                w_err("short read %s (%zu/%lld)", t->shard, got,
+                      (long long)t->nbytes);
+                st = HD_ERR_IO;
                 goto fail;
             }
-            hd_f32_buf_to_bf16((const float *)host, cast, (size_t)t->numel);
-            e = cudaMemcpy(dev, cast, (size_t)dev_nbytes, cudaMemcpyHostToDevice);
-            free(cast);
-        } else {
-            e = cudaMemcpy(dev, host, (size_t)t->nbytes, cudaMemcpyHostToDevice);
+            got += (size_t)rd;
         }
+        O1_TIMING_COUNTER_ADD("file_read_calls", 1);
+        O1_TIMING_COUNTER_ADD("file_read_bytes", (double)t->nbytes);
+
+        uint8_t *src = raw_slot;
+        int64_t dev = hd_dev_nbytes(t);
+        if (t->dtype == HD_DTYPE_F32) {
+            hd_f32_buf_to_bf16((const float *)raw_slot, dev_slot[cur], (size_t)t->numel);
+            src = dev_slot[cur];
+        } else {
+            memcpy(dev_slot[cur], raw_slot, (size_t)t->nbytes);
+            src = dev_slot[cur];
+        }
+
+        e = cudaMemcpyAsync((uint8_t *)info.arena_ptr + arena_off, src,
+                            (size_t)dev, cudaMemcpyHostToDevice, info.upload_stream);
         if (e != cudaSuccess) {
-            w_err("cudaMemcpy %s: %s", t->name, cudaGetErrorString(e));
-            cudaFree(dev);
+            w_err("cudaMemcpyAsync %s: %s", t->name, cudaGetErrorString(e));
             st = HD_ERR_IO;
             goto fail;
         }
+        cudaEventRecord(slot_ev[cur], info.upload_stream);
+        O1_TIMING_COUNTER_ADD("h2d_calls", 1);
+        O1_TIMING_COUNTER_ADD("h2d_bytes", (double)dev);
 
-        hd_device_alloc *a = &info.allocs[info.n_allocs];
-        a->dev_ptr = dev;
-        a->nbytes = dev_nbytes;
-        snprintf(a->name, sizeof(a->name), "%s", t->name);
+        info.allocs[oi].dev_ptr = (uint8_t *)info.arena_ptr + arena_off;
+        arena_off = hd_align_up(arena_off, HD_LOADER_ALIGN) + dev;
         info.n_allocs++;
         info.device_bytes_allocated += t->nbytes;
         info.host_bytes_loaded += t->nbytes;
+        cur ^= 1;
+    }
+    O1_TIMING_END("FILE_READ");
+
+    /* largest tensor: iterate in name order (matches the legacy loader's
+     * tie-break, where embed_tokens and lm_head share the same numel). */
+    for (int64_t i = 0; i < idx->n_tensors; i++) {
+        const hd_st_tensor *t = &idx->tensors[i];
         if (t->numel > info.largest_numel) {
             info.largest_numel = t->numel;
             snprintf(info.largest_name, sizeof(info.largest_name), "%s", t->name);
         }
     }
 
-    free(host);
-    e = cudaDeviceSynchronize();
-    if (e != cudaSuccess) { w_err("cudaDeviceSynchronize: %s", cudaGetErrorString(e)); st = HD_ERR_IO; goto fail; }
+    free(order);
+    for (int k = 0; k < n_shards; k++) close(shards[k].fd);
+    cudaEventDestroy(slot_ev[0]);
+    cudaEventDestroy(slot_ev[1]);
+    cudaFreeHost(raw_slot);
+    cudaFreeHost(dev_slot[0]);
+    cudaFreeHost(dev_slot[1]);
+
+    e = cudaStreamSynchronize(info.upload_stream);
+    if (e != cudaSuccess) { w_err("upload stream sync: %s", cudaGetErrorString(e)); st = HD_ERR_IO; goto fail; }
+
+    O1_TIMING_COUNTER_SET("tensor_count", (double)idx->n_tensors);
+    O1_TIMING_COUNTER_SET("disk_gbps", info.host_bytes_loaded / 1e9 /
+                          (o1_timing_region_seconds("FILE_READ") > 0
+                               ? o1_timing_region_seconds("FILE_READ") : 1e-9));
+    /* H2D is overlapped with FILE_READ on the upload stream; report the
+     * effective rate over the same window. */
+    O1_TIMING_COUNTER_SET("h2d_gbps", info.host_bytes_loaded / 1e9 /
+                          (o1_timing_region_seconds("FILE_READ") > 0
+                               ? o1_timing_region_seconds("FILE_READ") : 1e-9));
 
     /* M2: persistent cuBLAS/cuBLASLt GEMM runtime (created once, destroyed
      * in hd_weight_store_free). 64 MiB workspace for cuBLASLt plans. */
@@ -370,9 +504,165 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
     return HD_OK;
 
 fail:
-    free(host);
+    if (info.arena_ptr) cudaFree(info.arena_ptr);
+    if (info.upload_stream) cudaStreamDestroy(info.upload_stream);
     if (info.gemm) hd_gemm_runtime_destroy(info.gemm);
-    for (int64_t i = 0; i < info.n_allocs; i++) cudaFree(info.allocs[i].dev_ptr);
+    free(info.allocs);
+    return st;
+}
+
+/* ------------------------------------------------------------------ */
+/* M3 GGUF pack loader                                                 */
+/* ------------------------------------------------------------------ */
+
+hd_status hd_weights_to_device_gguf(const char *gguf_path, int device_id,
+                                    hd_weight_store *out) {
+    O1_TIMING_BEGIN("MODEL_LOAD");
+    hd_weight_store info;
+    hd_status st = hd_device_info(device_id, &info);
+    if (st != HD_OK) return st;
+
+    cudaError_t e = cudaSetDevice(device_id);
+    if (e != cudaSuccess) { w_err("cudaSetDevice: %s", cudaGetErrorString(e)); return HD_ERR_IO; }
+
+    hd_gguf_file gf;
+    st = hd_gguf_open(gguf_path, &gf);
+    if (st != HD_OK) { w_err("gguf: %s", hd_gguf_last_error()); return st; }
+
+    info.allocs = calloc((size_t)gf.n_tensors, sizeof(hd_device_alloc));
+    if (!info.allocs) { w_err("oom alloc table"); hd_gguf_close(&gf); return HD_ERR_OOM; }
+
+    /* ---- one aligned CUDA arena ---- */
+    O1_TIMING_BEGIN("CUDA_ALLOC");
+    e = cudaMalloc(&info.arena_ptr, (size_t)gf.payload_bytes);
+    O1_TIMING_END("CUDA_ALLOC");
+    if (e != cudaSuccess) {
+        w_err("cudaMalloc arena %llu bytes: %s",
+              (unsigned long long)gf.payload_bytes, cudaGetErrorString(e));
+        hd_gguf_close(&gf);
+        free(info.allocs);
+        return HD_ERR_OOM;
+    }
+    info.arena_bytes = (int64_t)gf.payload_bytes;
+    O1_TIMING_COUNTER_SET("cuda_malloc_calls", 1);
+
+    /* ---- pinned staging + dedicated nonblocking upload stream ---- */
+    uint8_t *stage[HD_LOADER_STAGE_SLOTS] = {0};
+    cudaEvent_t ev[HD_LOADER_STAGE_SLOTS] = {0};
+    for (int i = 0; i < HD_LOADER_STAGE_SLOTS; i++) {
+        e = cudaMallocHost(&stage[i], HD_LOADER_STAGE_BYTES);
+        if (e != cudaSuccess) {
+            w_err("cudaMallocHost stage %d: %s", i, cudaGetErrorString(e));
+            st = HD_ERR_OOM;
+            goto fail;
+        }
+        cudaEventCreateWithFlags(&ev[i], cudaEventDisableTiming);
+    }
+    e = cudaStreamCreateWithFlags(&info.upload_stream, cudaStreamNonBlocking);
+    if (e != cudaSuccess) { w_err("cudaStreamCreate: %s", cudaGetErrorString(e)); st = HD_ERR_OOM; goto fail; }
+
+    /* ---- stream the payload sequentially: file -> pinned -> arena ---- */
+    int fd = open(gguf_path, O_RDONLY);
+    if (fd < 0) { w_err("open %s: %s", gguf_path, strerror(errno)); st = HD_ERR_IO; goto fail; }
+
+    O1_TIMING_BEGIN("FILE_READ");
+    uint64_t payload = gf.payload_bytes;
+    uint64_t off = 0;
+    int slot = 0;
+    while (off < payload) {
+        size_t n = (size_t)((payload - off) < HD_LOADER_STAGE_BYTES
+                                ? (payload - off) : HD_LOADER_STAGE_BYTES);
+        /* Wait for this slot's previous upload before overwriting it. */
+        if (off >= (uint64_t)HD_LOADER_STAGE_BYTES * HD_LOADER_STAGE_SLOTS)
+            cudaEventSynchronize(ev[slot]);
+
+        size_t got = 0;
+        while (got < n) {
+            ssize_t rd = pread(fd, stage[slot] + got, n - got,
+                               (off_t)(gf.tensor_data_off + off + got));
+            if (rd <= 0) {
+                w_err("short read gguf (%zu/%zu)", got, n);
+                close(fd);
+                st = HD_ERR_IO;
+                goto fail;
+            }
+            got += (size_t)rd;
+        }
+        O1_TIMING_COUNTER_ADD("file_read_calls", 1);
+        O1_TIMING_COUNTER_ADD("file_read_bytes", (double)n);
+
+        e = cudaMemcpyAsync((uint8_t *)info.arena_ptr + off, stage[slot], n,
+                            cudaMemcpyHostToDevice, info.upload_stream);
+        if (e != cudaSuccess) {
+            w_err("cudaMemcpyAsync: %s", cudaGetErrorString(e));
+            close(fd);
+            st = HD_ERR_IO;
+            goto fail;
+        }
+        cudaEventRecord(ev[slot], info.upload_stream);
+        O1_TIMING_COUNTER_ADD("h2d_calls", 1);
+        O1_TIMING_COUNTER_ADD("h2d_bytes", (double)n);
+
+        off += n;
+        slot = (slot + 1) % HD_LOADER_STAGE_SLOTS;
+    }
+    O1_TIMING_END("FILE_READ");
+    close(fd);
+
+    e = cudaStreamSynchronize(info.upload_stream);
+    if (e != cudaSuccess) { w_err("upload stream sync: %s", cudaGetErrorString(e)); st = HD_ERR_IO; goto fail; }
+
+    /* ---- bind pointers: tensor i lives at arena + offset ---- */
+    for (int64_t i = 0; i < gf.n_tensors; i++) {
+        const hd_gguf_tensor *t = &gf.tensors[i];
+        hd_device_alloc *a = &info.allocs[i];
+        a->dev_ptr = (uint8_t *)info.arena_ptr + t->offset;
+        a->nbytes = (int64_t)t->nbytes;
+        snprintf(a->name, sizeof(a->name), "%s", t->name);
+        info.n_allocs++;
+        info.device_bytes_allocated += (int64_t)t->nbytes;
+        info.host_bytes_loaded += (int64_t)t->nbytes;
+        if (t->nbytes > (uint64_t)info.largest_numel) {
+            info.largest_numel = (int64_t)t->nbytes;
+            snprintf(info.largest_name, sizeof(info.largest_name), "%s", t->name);
+        }
+    }
+
+    for (int i = 0; i < HD_LOADER_STAGE_SLOTS; i++) {
+        cudaEventDestroy(ev[i]);
+        cudaFreeHost(stage[i]);
+    }
+
+    O1_TIMING_COUNTER_SET("tensor_count", (double)gf.n_tensors);
+    O1_TIMING_COUNTER_SET("disk_gbps", info.host_bytes_loaded / 1e9 /
+                          (o1_timing_region_seconds("FILE_READ") > 0
+                               ? o1_timing_region_seconds("FILE_READ") : 1e-9));
+    O1_TIMING_COUNTER_SET("h2d_gbps", info.host_bytes_loaded / 1e9 /
+                          (o1_timing_region_seconds("FILE_READ") > 0
+                               ? o1_timing_region_seconds("FILE_READ") : 1e-9));
+
+    info.gemm = hd_gemm_runtime_init(device_id, 0);
+    if (!info.gemm) {
+        w_err("gemm runtime init failed: %s", hd_cuda_errbuf());
+        hd_gguf_close(&gf);
+        st = HD_ERR_IO;
+        goto fail;
+    }
+
+    hd_gguf_close(&gf);
+    O1_TIMING_END("MODEL_LOAD");
+    *out = info;
+    return HD_OK;
+
+fail:
+    for (int i = 0; i < HD_LOADER_STAGE_SLOTS; i++) {
+        if (ev[i]) cudaEventDestroy(ev[i]);
+        if (stage[i]) cudaFreeHost(stage[i]);
+    }
+    if (info.arena_ptr) cudaFree(info.arena_ptr);
+    if (info.upload_stream) cudaStreamDestroy(info.upload_stream);
+    if (info.gemm) hd_gemm_runtime_destroy(info.gemm);
+    hd_gguf_close(&gf);
     free(info.allocs);
     return st;
 }
@@ -380,8 +670,13 @@ fail:
 void hd_weight_store_free(hd_weight_store *s) {
     if (!s) return;
     if (s->gemm) hd_gemm_runtime_destroy(s->gemm);
-    for (int64_t i = 0; i < s->n_allocs; i++) {
-        if (s->allocs[i].dev_ptr) cudaFree(s->allocs[i].dev_ptr);
+    if (s->upload_stream) cudaStreamDestroy(s->upload_stream);
+    if (s->arena_ptr) {
+        cudaFree(s->arena_ptr);
+    } else {
+        for (int64_t i = 0; i < s->n_allocs; i++) {
+            if (s->allocs[i].dev_ptr) cudaFree(s->allocs[i].dev_ptr);
+        }
     }
     free(s->allocs);
     memset(s, 0, sizeof(*s));

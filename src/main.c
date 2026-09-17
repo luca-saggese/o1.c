@@ -342,7 +342,7 @@ int main(int argc, char **argv) {
             rc = 1;
             goto done;
         }
-        hd_weight_store store;
+        hd_weight_store store = {0};
         st = hd_weights_to_device(dir, &idx, device_id, &store);
         if (st != HD_OK) {
             fprintf(stderr, "FAIL: %s\n", hd_weights_last_error());

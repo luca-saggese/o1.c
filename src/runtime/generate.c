@@ -254,19 +254,30 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
 
     /* ---- load weights ---- */
     O1_TIMING_BEGIN("INPUT_PREPARE");
-    hd_st_index idx;
-    if (hd_st_index_load(model_dir, &idx) != HD_OK) {
-        hd_set_error("generate: index: %s", hd_st_last_error());
-        hd_sequence_free(&seq);
-        return HD_ERR_IO;
-    }
-    hd_weight_store store;
-    st = hd_weights_to_device(model_dir, &idx, device_id, &store);
-    hd_st_index_free(&idx);
-    if (st != HD_OK) {
-        hd_set_error("generate: weights: %s", hd_weights_last_error());
-        hd_sequence_free(&seq);
-        return st;
+    hd_weight_store store = {0};
+    size_t mdlen = strlen(model_dir);
+    int is_gguf = mdlen > 5 && strcmp(model_dir + mdlen - 5, ".gguf") == 0;
+    if (is_gguf) {
+        st = hd_weights_to_device_gguf(model_dir, device_id, &store);
+        if (st != HD_OK) {
+            hd_set_error("generate: weights: %s", hd_weights_last_error());
+            hd_sequence_free(&seq);
+            return st;
+        }
+    } else {
+        hd_st_index idx;
+        if (hd_st_index_load(model_dir, &idx) != HD_OK) {
+            hd_set_error("generate: index: %s", hd_st_last_error());
+            hd_sequence_free(&seq);
+            return HD_ERR_IO;
+        }
+        st = hd_weights_to_device(model_dir, &idx, device_id, &store);
+        hd_st_index_free(&idx);
+        if (st != HD_OK) {
+            hd_set_error("generate: weights: %s", hd_weights_last_error());
+            hd_sequence_free(&seq);
+            return st;
+        }
     }
     hd_forward_binding bw;
     st = hd_forward_resolve(&store, NLAYERS, &bw);

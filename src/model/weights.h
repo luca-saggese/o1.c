@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <cuda_runtime.h>
+
 #include "hidream.h"
 #include "safetensors.h"
 #include "gemm.h"
@@ -94,6 +96,13 @@ typedef struct {
 
     /* M2 production GEMM runtime (persistent cuBLAS/cuBLASLt handles). */
     struct hd_gemm_runtime *gemm;
+
+    /* M3 loader: single aligned CUDA weight arena. When arena_ptr is set,
+     * every allocs[i].dev_ptr points inside it and hd_weight_store_free
+     * releases the arena once instead of per-tensor cudaFree. */
+    void *arena_ptr;
+    int64_t arena_bytes;
+    cudaStream_t upload_stream;
 } hd_weight_store;
 
 /* Queries the CUDA device identity without allocating model memory. */
@@ -106,6 +115,15 @@ hd_status hd_device_info(int device_id, hd_weight_store *out);
  */
 hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
                                int device_id, hd_weight_store *out);
+
+/*
+ * M3: loads a materialized GGUF pack (tools/hidream_convert.py output) into
+ * a single aligned CUDA arena using pinned staging + a dedicated nonblocking
+ * upload stream. The pack is already BF16 in production order, so the
+ * payload streams sequentially with no per-tensor cast or lookup.
+ */
+hd_status hd_weights_to_device_gguf(const char *gguf_path, int device_id,
+                                    hd_weight_store *out);
 
 void hd_weight_store_free(hd_weight_store *s);
 
