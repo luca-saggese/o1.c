@@ -66,10 +66,10 @@ src/          C/CUDA engine sources
   runtime/    Request, sequence builder, generate, decode, preview, refiner
   cuda/       Hand-written CUDA kernels (norm, rope, gemm, attn, act, embed,
               residual, sched, support)
-  io/         JSON, safetensors, sha256 readers
+  io/         JSON, safetensors, GGUF, sha256 readers
   image/      PNG encode/decode
 tests/        C test harnesses (unit + integration)
-tools/        Python oracle helpers (freeze, capture, guard/ledger)
+tools/        Python oracle helpers (freeze, capture, guard/ledger, gguf convert)
 config/       Versioned locks and model profiles (oracle.lock, models.lock,
               dev.json, base.json, manifests)
 scripts/      Bootstrap scripts (checkout oracle, download models, freeze)
@@ -111,6 +111,44 @@ cuBLAS (`cublasGemmEx`, BF16 in/out, FP32 accumulate); the hand-written
 reference GEMM remains selectable via `hd_gemm_set_backend(0)` for
 correctness/debug only.
 
+## GGUF weight pack (M3 loader)
+
+The engine can load weights from either the raw safetensors shards or a
+single materialized **GGUF v3 pack**. The pack is the recommended production
+format: it is already BF16, 256-byte aligned, and in production tensor order,
+so runtime loading is one sequential `file -> pinned staging -> CUDA arena`
+stream (no JSON, no per-tensor lookup, no cast, no per-tensor `cudaMalloc`).
+
+Convert the safetensors shards once (offline, needs numpy):
+
+```sh
+python3 tools/hidream_convert.py \
+    --source models/dev \
+    --output artifacts/models/hidream-o1-dev-bf16.gguf \
+    --profile dev \
+    --revision b6acc2fe452b3120430620dc4354fa442ee081ea
+```
+
+Then point the engine at the pack with `--model-dir`:
+
+```sh
+./build/hidream --model dev --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+    --prompt "a teapot" --steps 28 --seed 123456 --output out.png
+```
+
+Measured on GB10 (Dev 1024², 28 steps, BF16):
+
+| Loader | FILE_READ | MODEL_LOAD | disk GB/s |
+|--------|-----------|------------|-----------|
+| safetensors legacy (per-tensor) | 29.1 s | 30.1 s | 1.21 |
+| safetensors pipelined (arena + async) | 17.5 s | 26.9 s | 2.01 |
+| **GGUF pack** | **1.9 s** | **4.7 s** | **9.3** |
+
+Output is bit-identical across all three loaders (verified 28-step,
+cos = 1.0). The GGUF reader (`src/io/gguf.c`) is a minimal C parser with no
+ggml/llama.cpp dependency; `test-gguf` validates header parse and payload
+round-trip against the source safetensors.
+
 ## CLI usage
 
 ```
@@ -130,7 +168,8 @@ build/hidream [options]
   --noise-end F           noise_scale_end (default 8.0)
   --noise-clip F          noise_clip_std (default 8.0)
   --output PATH           output PNG path (default: output.png)
-  --model-dir DIR         override profile local_path
+  --model-dir DIR         override profile local_path; a path ending in
+                          .gguf loads the materialized GGUF weight pack
   --device N              CUDA device index (default: 0)
 ```
 
@@ -162,6 +201,7 @@ Example:
 | `test-gemm-smoke` | deterministic cuBLAS GEMM mapping check |
 | `test-layer-replay` | layer-by-layer reference-vs-cuBLAS chain comparison |
 | `test-final-head` | final-head GEMM decisive test (5 configs) |
+| `test-gguf` | GGUF pack header parse + payload round-trip vs safetensors |
 | `bench-block` | per-stage decoder block benchmark (CUDA events) |
 
 ## Milestone status
@@ -196,6 +236,9 @@ Current state (see [`docs/M2_CUBLAS_FREEZE.md`](docs/M2_CUBLAS_FREEZE.md)):
 - **Persistent cuBLAS GEMM backend** — `cublasGemmEx` (BF16 in/out, FP32
   accumulate) with handles created once at runtime init; the hand-written
   reference GEMM (0.28 TFLOP/s) is kept for correctness/debug only.
+- **Pipelined weight loader** — one aligned CUDA arena, pinned staging,
+  dedicated nonblocking upload stream; safetensors load drops from 30 s to
+  27 s, and the materialized GGUF pack (see above) to ~5 s.
 - **Frozen performance** — native Dev 1024²/28-step generation ≈27 s vs
   ≈90 s Python legacy (≈3.3× speedup) and ≈25 min estimated for the old
   reference GEMM (≈50×+). A known numerical discrepancy (13/14 full-forward
