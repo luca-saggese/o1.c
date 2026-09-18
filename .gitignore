@@ -1,6 +1,9 @@
 # --- Upstream Python oracle (owned by upstream, never absorbed) ---
 /python/
 
+# --- Upstream reference checkout (read-only, never committed) ---
+/_reference/
+
 # --- Model weights ---
 /models/
 
