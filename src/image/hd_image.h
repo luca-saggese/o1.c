@@ -48,7 +48,7 @@ hd_status hd_image_resize(const hd_image *src, int image_size, int patch_size,
 /*
  * Oracle direct resize for the VLM conditioning path:
  *   pil_cond = img.resize((cw, ch), Image.LANCZOS)
- * Resizes exactly to (new_w, new_h) with the PIL-BICUBIC 4-tap resampler.
+ * Resizes exactly to (new_w, new_h) with an antialiased Lanczos-3 resampler.
  * No aspect-preserving scale, no center crop, no intermediate oversize.
  */
 hd_status hd_image_resize_exact(const hd_image *src, int new_w, int new_h,

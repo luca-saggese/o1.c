@@ -29,6 +29,7 @@
 #include "hd_image.h"
 
 #include <cuda_runtime.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -749,17 +750,22 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
 
     /* upload ref patches (fixed) as bf16 */
     {
-        float *ref_f32 = malloc(total_ref_tokens * FF * sizeof(float));
-        void *ref_f32_dev = dev_alloc(total_ref_tokens * FF * 4);
+        if (total_ref_tokens > (size_t)INT_MAX / FF) {
+            hd_set_error("generate: reference patch element count overflow");
+            goto fail;
+        }
+        size_t ref_elems = total_ref_tokens * FF;
+        float *ref_f32 = malloc(ref_elems * sizeof(float));
+        void *ref_f32_dev = dev_alloc(ref_elems * sizeof(float));
         if (!ref_f32 || !ref_f32_dev) {
             free(ref_f32);
             hd_set_error("generate: oom ref f32");
             goto fail;
         }
-        memcpy(ref_f32, ref_patches, total_ref_tokens * FF * sizeof(float));
-        cudaMemcpy(ref_f32_dev, ref_f32, total_ref_tokens * FF * 4,
+        memcpy(ref_f32, ref_patches, ref_elems * sizeof(float));
+        cudaMemcpy(ref_f32_dev, ref_f32, ref_elems * sizeof(float),
                    cudaMemcpyHostToDevice);
-        hd_f32_convert_bf16(ref_f32_dev, ref_dev, (int)total_ref_tokens);
+        hd_f32_convert_bf16(ref_f32_dev, ref_dev, (int)ref_elems);
         dev_free(ref_f32_dev);
         free(ref_f32);
     }

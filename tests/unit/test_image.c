@@ -168,12 +168,73 @@ static void test_keep_aspect(void) {
     free(ref.rgb);
 }
 
+static void test_vlm_preprocess_oracle(void) {
+    const char *oracle_path =
+        "artifacts/ref_image_audit/oracle_dump/pixel_values.bin";
+    FILE *f = fopen(oracle_path, "rb");
+    if (!f) {
+        printf("  skip VLM preprocessing oracle (fixture unavailable)\n");
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long bytes = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    size_t n = (size_t)bytes / sizeof(float);
+    float *oracle = malloc((size_t)bytes);
+    if (!oracle || fread(oracle, 1, (size_t)bytes, f) != (size_t)bytes) {
+        fclose(f);
+        free(oracle);
+        CHECK(0, "load VLM preprocessing oracle");
+        return;
+    }
+    fclose(f);
+
+    hd_image src = {0}, resized = {0};
+    hd_status st = hd_image_load("example_assets/edit/test.jpg", &src);
+    CHECK(st == HD_OK, "load edit reference for VLM preprocessing");
+    if (st != HD_OK) { free(oracle); return; }
+    st = hd_image_resize_exact(&src, 320, 416, &resized);
+    hd_image_free(&src);
+    CHECK(st == HD_OK, "resize edit reference to oracle VLM grid");
+    if (st != HD_OK) { free(oracle); return; }
+
+    for (int i = 0; i < resized.width * resized.height * 3; i++)
+        resized.rgb[i] = (resized.rgb[i] - 0.5f) / 0.5f;
+    size_t want = (size_t)520 * 1536;
+    float *native = malloc(want * sizeof(float));
+    CHECK(native != NULL && n == want, "VLM oracle element count");
+    if (!native || n != want) {
+        hd_image_free(&resized);
+        free(native);
+        free(oracle);
+        return;
+    }
+    st = hd_image_to_vlm_patches(&resized, 16, 2, 2, native);
+    hd_image_free(&resized);
+    CHECK(st == HD_OK, "patchify edit reference for VLM");
+    if (st == HD_OK) {
+        double dot = 0.0, na = 0.0, nb = 0.0, err = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double a = native[i], b = oracle[i], d = a - b;
+            dot += a * b; na += a * a; nb += b * b; err += d * d;
+        }
+        double cos = dot / sqrt(na * nb);
+        double rel = sqrt(err / nb);
+        printf("  VLM preprocess: cos=%.8f nrmse=%.8f\n", cos, rel);
+        CHECK(cos > 0.999 && rel < 0.05,
+              "native VLM preprocessing matches processor oracle");
+    }
+    free(native);
+    free(oracle);
+}
+
 int main(void) {
     test_calc_dims();
     test_resize();
     test_to_patches();
     test_png_roundtrip();
     test_keep_aspect();
+    test_vlm_preprocess_oracle();
 
     printf("\n%s\n", failures == 0 ? "ALL IMAGE TESTS PASSED" : "SOME FAILED");
     return failures == 0 ? 0 : 1;

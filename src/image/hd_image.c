@@ -260,6 +260,97 @@ static void bicubic_resample(const hd_image *src, int new_w, int new_h,
     dst->width = new_w; dst->height = new_h; dst->rgb = out;
 }
 
+static double sinc_pi(double x) {
+    if (fabs(x) < 1e-12) return 1.0;
+    double px = 3.14159265358979323846 * x;
+    return sin(px) / px;
+}
+
+static double lanczos3(double x) {
+    x = fabs(x);
+    if (x >= 3.0) return 0.0;
+    return sinc_pi(x) * sinc_pi(x / 3.0);
+}
+
+/*
+ * PIL LANCZOS-style separable resize. For reductions, widen the filter by
+ * the source/destination scale to provide the antialiasing that a fixed
+ * six-tap Lanczos kernel lacks. PIL returns an 8-bit RGB image, so quantize
+ * the final samples before exposing them as the engine's [0,1] floats.
+ */
+static void lanczos_resample(const hd_image *src, int new_w, int new_h,
+                             hd_image *dst) {
+    double sx = (double)src->width / new_w;
+    double sy = (double)src->height / new_h;
+    double fsx = sx > 1.0 ? sx : 1.0;
+    double fsy = sy > 1.0 ? sy : 1.0;
+    double rx = 3.0 * fsx;
+    double ry = 3.0 * fsy;
+    float *tmp = malloc((size_t)new_w * src->height * 3 * sizeof(float));
+    float *out = malloc((size_t)new_w * new_h * 3 * sizeof(float));
+    if (!tmp || !out) {
+        free(tmp);
+        free(out);
+        dst->rgb = NULL;
+        return;
+    }
+
+    for (int y = 0; y < src->height; y++) {
+        for (int x = 0; x < new_w; x++) {
+            double center = (x + 0.5) * sx - 0.5;
+            int first = (int)ceil(center - rx);
+            int last = (int)floor(center + rx);
+            double sum[3] = {0.0, 0.0, 0.0};
+            double wsum = 0.0;
+            for (int ix = first; ix <= last; ix++) {
+                int clamped = ix;
+                if (clamped < 0) clamped = 0;
+                if (clamped >= src->width) clamped = src->width - 1;
+                double w = lanczos3((ix - center) / fsx);
+                wsum += w;
+                const float *p =
+                    &src->rgb[((size_t)y * src->width + clamped) * 3];
+                for (int c = 0; c < 3; c++) sum[c] += w * p[c];
+            }
+            float *p = &tmp[((size_t)y * new_w + x) * 3];
+            for (int c = 0; c < 3; c++)
+                p[c] = (float)(wsum != 0.0 ? sum[c] / wsum : 0.0);
+        }
+    }
+
+    for (int y = 0; y < new_h; y++) {
+        double center = (y + 0.5) * sy - 0.5;
+        int first = (int)ceil(center - ry);
+        int last = (int)floor(center + ry);
+        for (int x = 0; x < new_w; x++) {
+            double sum[3] = {0.0, 0.0, 0.0};
+            double wsum = 0.0;
+            for (int iy = first; iy <= last; iy++) {
+                int clamped = iy;
+                if (clamped < 0) clamped = 0;
+                if (clamped >= src->height) clamped = src->height - 1;
+                double w = lanczos3((iy - center) / fsy);
+                wsum += w;
+                const float *p =
+                    &tmp[((size_t)clamped * new_w + x) * 3];
+                for (int c = 0; c < 3; c++) sum[c] += w * p[c];
+            }
+            float *p = &out[((size_t)y * new_w + x) * 3];
+            for (int c = 0; c < 3; c++) {
+                double v = wsum != 0.0 ? sum[c] / wsum : 0.0;
+                int u8 = (int)floor(v * 255.0 + 0.5);
+                if (u8 < 0) u8 = 0;
+                if (u8 > 255) u8 = 255;
+                p[c] = (float)u8 / 255.0f;
+            }
+        }
+    }
+    free(tmp);
+    dst->width = new_w;
+    dst->height = new_h;
+    dst->rgb = out;
+}
+
 /* PIL BOX resample: average of source pixels mapping to each dst pixel. */
 static void box_resample(const hd_image *src, int new_w, int new_h,
                          hd_image *dst) {
@@ -369,10 +460,9 @@ hd_status hd_image_resize(const hd_image *src, int image_size, int patch_size,
 /*
  * Oracle direct resize parity (pipeline.py VLM conditioning path):
  *   pil_cond = img.resize((cw, ch), Image.LANCZOS)
- * Resizes exactly to (new_w, new_h) with the PIL-BICUBIC 4-tap resampler
- * (closest available native resampler to Lanczos). No aspect-preserving
- * scale, no center crop, no intermediate oversize: the output dimensions
- * are exactly the requested ones.
+ * Resizes exactly to (new_w, new_h) with an antialiased Lanczos-3 filter.
+ * No aspect-preserving scale, no center crop, no intermediate oversize: the
+ * output dimensions are exactly the requested ones.
  * Returns HD_ERR_MISSING if src is NULL or dims are non-positive.
  */
 hd_status hd_image_resize_exact(const hd_image *src, int new_w, int new_h,
@@ -382,7 +472,7 @@ hd_status hd_image_resize_exact(const hd_image *src, int new_w, int new_h,
         hd_set_error("hd_image: resize_exact bad args");
         return HD_ERR_MISSING;
     }
-    bicubic_resample(src, new_w, new_h, out);
+    lanczos_resample(src, new_w, new_h, out);
     if (!out->rgb) {
         hd_set_error("hd_image: resize_exact oom");
         return HD_ERR_OOM;
@@ -467,7 +557,6 @@ hd_status hd_image_to_vlm_patches(const hd_image *img, int patch_size,
     int p = patch_size;
     int C = 3;
     int mh = gh / m, mw = gw / m;
-    int n = mh * mw * m * m;   /* grid_t=1 */
     int token_dim = C * t * p * p;
 
     /* Processor patchify (grid_t=1):
