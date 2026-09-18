@@ -195,6 +195,442 @@ static hd_status build_t2i_ids(const char *prompt, int64_t **out_ids,
 /* Generation                                                          */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Reference-mode generation (edit / personalize / layout / skeleton).
+ *
+ * Oracle pipeline.py ref path parity:
+ *   - each ref resized to max_size (K==1: max(h,w); K==2: max*48/64;
+ *     K<=4: max/2; K<=8: max*24/64; else max/4), patch-aligned,
+ *     normalized [-1,1], pixel_unshuffled to [tokens, 3072]
+ *   - sequence built by hd_seq_build (template + vision blocks)
+ *   - per step: vinputs = cat([z, ref_patches]); forward; select target rows
+ *
+ * Dev/flash scheduler only (editing default per upstream). The known
+ * pre-existing multi-step "double free" engine bug is not addressed here.
+ */
+static hd_status hd_generate_ref(const hd_generation_request *req,
+                                 const char *model_dir, int device_id,
+                                 unsigned char **out_rgb, int *out_w,
+                                 int *out_h) {
+    int W = req->width, Hh = req->height;
+    int K = (int)req->reference_count;
+    if (K <= 0 || K > HD_SEQ_MAX_REFS) {
+        hd_set_error("generate: ref count %d out of range", K);
+        return HD_ERR_MISSING;
+    }
+
+    /* keep_original_aspect: single ref -> derive output dims from the ref */
+    if (req->keep_original_aspect && K == 1) {
+        hd_image ref_img;
+        hd_status kst = hd_image_load(req->references[0].path, &ref_img);
+        if (kst != HD_OK) {
+            hd_set_error("generate: ref load: %s", hd_last_error());
+            return kst;
+        }
+        hd_image_keep_aspect(&ref_img, W, Hh, PATCH, &W, &Hh);
+        hd_image_free(&ref_img);
+    }
+
+    int grid_h = Hh / PATCH, grid_w = W / PATCH;
+    if (grid_h <= 0 || grid_w <= 0 || Hh % PATCH || W % PATCH) {
+        hd_set_error("generate: dimensions %dx%d not multiple of patch %d",
+                     W, Hh, PATCH);
+        return HD_ERR_MISSING;
+    }
+    int IMG = grid_h * grid_w;
+    size_t nimg = (size_t)IMG * FF;
+
+    /* ---- load + preprocess references ---- */
+    O1_TIMING_BEGIN("REF_PREPROCESS");
+    int max_size = (W > Hh ? W : Hh);
+    if (K == 2) max_size = max_size * 48 / 64;
+    else if (K <= 4) max_size = max_size / 2;
+    else if (K <= 8) max_size = max_size * 24 / 64;
+    else max_size = max_size / 4;
+    if (K == 1) max_size = (W > Hh ? W : Hh); /* K==1: no downscale */
+
+    hd_ref_geom refs[HD_SEQ_MAX_REFS];
+    memset(refs, 0, sizeof(refs));
+    float *ref_patches = NULL;
+    size_t total_ref_tokens = 0;
+    hd_status st = HD_OK;
+
+    for (int r = 0; r < K; r++) {
+        hd_image img;
+        st = hd_image_load(req->references[r].path, &img);
+        if (st != HD_OK) {
+            hd_set_error("generate: ref %d load: %s", r, hd_last_error());
+            return st;
+        }
+        hd_image resized;
+        st = hd_image_resize(&img, max_size, PATCH, &resized);
+        hd_image_free(&img);
+        if (st != HD_OK) {
+            hd_set_error("generate: ref %d resize: %s", r, hd_last_error());
+            return st;
+        }
+        int gh = resized.height / PATCH, gw = resized.width / PATCH;
+        size_t tokens = (size_t)gh * gw;
+        float *patches = malloc(tokens * FF * sizeof(float));
+        if (!patches) { hd_image_free(&resized); return HD_ERR_OOM; }
+        st = hd_image_to_patches(&resized, PATCH, patches);
+        int ref_w = resized.width, ref_h = resized.height;
+        hd_image_free(&resized);
+        if (st != HD_OK) { free(patches); return st; }
+        for (size_t i = 0; i < tokens * FF; i++) patches[i] = patches[i] * 2.0f - 1.0f;
+
+        /* cond grid (VLM): oracle calculate_dimensions(cond_img_size, ratio) */
+        int cond_w, cond_h;
+        hd_image_calc_dims(CONDITION_IMAGE_SIZE, (float)ref_w, (float)ref_h,
+                           PATCH, &cond_w, &cond_h);
+        cond_w = cond_w / PATCH;
+        cond_h = cond_h / PATCH;
+        if (cond_w < 1) cond_w = 1;
+        if (cond_h < 1) cond_h = 1;
+
+        refs[r].tokens = (int)tokens;
+        refs[r].grid_h = gh;
+        refs[r].grid_w = gw;
+        refs[r].cond_h = cond_h;
+        refs[r].cond_w = cond_w;
+
+        /* append to ref_patches */
+        float *np = realloc(ref_patches, (total_ref_tokens + tokens) * FF * sizeof(float));
+        if (!np) { free(patches); free(ref_patches); return HD_ERR_OOM; }
+        ref_patches = np;
+        memcpy(ref_patches + total_ref_tokens * FF, patches, tokens * FF * sizeof(float));
+        free(patches);
+        total_ref_tokens += tokens;
+    }
+    O1_TIMING_END("REF_PREPROCESS");
+
+    /* ---- build sequence ---- */
+    O1_TIMING_BEGIN("PROMPT_TOKENIZE");
+    hd_sequence seq;
+    memset(&seq, 0, sizeof(seq));
+    st = hd_seq_build(req, PATCH, 151655, 151656, 151652, TMS_ID, 1, 1,
+                      4096, Hh, W, refs, &seq);
+    if (st != HD_OK) {
+        hd_set_error("generate: sequence: %s", hd_last_error());
+        free(ref_patches);
+        return st;
+    }
+    if (seq.image_len != IMG) {
+        hd_set_error("generate: sequence image_len %d != %d", seq.image_len, IMG);
+        hd_sequence_free(&seq);
+        free(ref_patches);
+        return HD_ERR_MISMATCH;
+    }
+    int S = seq.S;
+    int text_len = seq.text_len;
+    O1_TIMING_END("PROMPT_TOKENIZE");
+
+    /* ---- load weights ---- */
+    O1_TIMING_BEGIN("INPUT_PREPARE");
+    hd_weight_store store = {0};
+    size_t mdlen = strlen(model_dir);
+    int is_gguf = mdlen > 5 && strcmp(model_dir + mdlen - 5, ".gguf") == 0;
+    if (is_gguf) {
+        st = hd_weights_to_device_gguf(model_dir, device_id, &store);
+        if (st != HD_OK) {
+            hd_set_error("generate: weights: %s", hd_weights_last_error());
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            return st;
+        }
+    } else {
+        hd_st_index idx;
+        if (hd_st_index_load(model_dir, &idx) != HD_OK) {
+            hd_set_error("generate: index: %s", hd_st_last_error());
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            return HD_ERR_IO;
+        }
+        st = hd_weights_to_device(model_dir, &idx, device_id, &store);
+        hd_st_index_free(&idx);
+        if (st != HD_OK) {
+            hd_set_error("generate: weights: %s", hd_weights_last_error());
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            return st;
+        }
+    }
+    hd_forward_binding bw;
+    st = hd_forward_resolve(&store, NLAYERS, &bw);
+    if (st != HD_OK) {
+        hd_set_error("generate: resolve: %s", hd_last_error());
+        hd_weight_store_free(&store);
+        hd_sequence_free(&seq);
+        free(ref_patches);
+        return st;
+    }
+    if (req->lora) {
+        st = hd_lora_apply(req->lora, &store, device_id);
+        if (st != HD_OK) {
+            hd_set_error("generate: lora: %s", hd_lora_last_error());
+            hd_forward_binding_free(&bw);
+            hd_weight_store_free(&store);
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            return st;
+        }
+    }
+
+    /* ---- workspace ---- */
+    int total_img = IMG + (int)total_ref_tokens;
+    int64_t scratch_bytes = 0;
+    int64_t ws_bytes = hd_forward_workspace_bytes(S, total_img, NH, NKV, H, I,
+                                                  HD, &scratch_bytes);
+    void *wsbase = dev_alloc((size_t)ws_bytes);
+    if (!wsbase) {
+        hd_set_error("generate: workspace alloc %lld bytes", (long long)ws_bytes);
+        hd_forward_binding_free(&bw);
+        hd_weight_store_free(&store);
+        hd_sequence_free(&seq);
+        free(ref_patches);
+        return HD_ERR_OOM;
+    }
+    hd_forward_workspace ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.hidden_a = wsbase;
+    ws.block_scratch_bytes = scratch_bytes;
+
+    /* cuDNN SDPA plan for the full sequence */
+    {
+        hd_sdpa_plan *plan = NULL;
+        float attn_scale = (float)(1.0 / sqrt((double)HD));
+        int rc = hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);
+        if (rc == 0) ws.sdpa = plan;
+    }
+
+    /* ---- stage device inputs ---- */
+    void *posd = dev_alloc((size_t)3 * S * 4);
+    void *maskd = dev_alloc((size_t)S * S * 2);
+    void *idsd = dev_alloc((size_t)text_len * 8);
+    int64_t sec_host[3] = {24, 20, 20};
+    void *secd = dev_alloc(sizeof(sec_host));
+    if (!posd || !maskd || !idsd || !secd) {
+        hd_set_error("generate: input alloc oom");
+        hd_forward_binding_free(&bw);
+        hd_weight_store_free(&store);
+        hd_sequence_free(&seq);
+        free(ref_patches);
+        dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
+        dev_free(secd);
+        return HD_ERR_OOM;
+    }
+    cudaMemcpy(posd, seq.pos_f32, (size_t)3 * S * 4, cudaMemcpyHostToDevice);
+    cudaMemcpy(maskd, seq.mask_bf16, (size_t)S * S * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(idsd, seq.input_ids, (size_t)text_len * 8, cudaMemcpyHostToDevice);
+    cudaMemcpy(secd, sec_host, sizeof(sec_host), cudaMemcpyHostToDevice);
+
+    /* ---- device buffers ---- */
+    void *z_prev_dev = NULL, *z_next_dev = NULL;
+    float *mo_dev = NULL, *noise_dev = NULL, *scratch = NULL;
+    float *tsd = NULL;
+    void *out_dev = NULL, *xp_dev = NULL;
+    void *ref_dev = NULL, *vinput_dev = NULL;
+    float *z_final = NULL;
+    unsigned char *rgb = NULL;
+    z_prev_dev = dev_alloc(nimg * 2);
+    z_next_dev = dev_alloc(nimg * 2);
+    mo_dev = dev_alloc(nimg * 4);
+    noise_dev = dev_alloc(nimg * 4);
+    scratch = dev_alloc(3 * nimg * 4);
+    tsd = dev_alloc(4);
+    out_dev = dev_alloc((size_t)S * FF * 2);
+    xp_dev = dev_alloc(nimg * 2);
+    ref_dev = dev_alloc(total_ref_tokens * FF * 2);
+    vinput_dev = dev_alloc((size_t)total_img * FF * 2);
+    if (!z_prev_dev || !z_next_dev || !mo_dev || !noise_dev || !scratch ||
+        !tsd || !out_dev || !xp_dev || !ref_dev || !vinput_dev) {
+        hd_set_error("generate: device alloc oom");
+        goto fail;
+    }
+
+    /* upload ref patches (fixed) as bf16 */
+    {
+        float *ref_f32 = malloc(total_ref_tokens * FF * sizeof(float));
+        void *ref_f32_dev = dev_alloc(total_ref_tokens * FF * 4);
+        if (!ref_f32 || !ref_f32_dev) {
+            free(ref_f32);
+            hd_set_error("generate: oom ref f32");
+            goto fail;
+        }
+        memcpy(ref_f32, ref_patches, total_ref_tokens * FF * sizeof(float));
+        cudaMemcpy(ref_f32_dev, ref_f32, total_ref_tokens * FF * 4,
+                   cudaMemcpyHostToDevice);
+        hd_f32_convert_bf16(ref_f32_dev, ref_dev, (int)total_ref_tokens);
+        dev_free(ref_f32_dev);
+        free(ref_f32);
+    }
+
+    /* ---- initial noise (target latent) ---- */
+    O1_TIMING_BEGIN("INITIAL_NOISE");
+    float *noise_h = malloc((size_t)3 * Hh * W * sizeof(float));
+    float *z_h = malloc(nimg * sizeof(float));
+    void *z_f32_dev = dev_alloc(nimg * 4);
+    if (!noise_h || !z_h || !z_f32_dev) {
+        free(noise_h); free(z_h);
+        hd_set_error("generate: oom noise");
+        goto fail;
+    }
+    gen_initial_noise(req->seed, W, Hh, noise_h);
+    pixel_unshuffle(noise_h, Hh, W, grid_h, grid_w, z_h);
+    for (size_t i = 0; i < nimg; i++) z_h[i] *= req->noise_scale_start;
+    cudaMemcpy(z_f32_dev, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
+    hd_f32_convert_bf16(z_f32_dev, z_prev_dev, (int)nimg);
+    dev_free(z_f32_dev);
+    free(noise_h); free(z_h);
+    O1_TIMING_END("INITIAL_NOISE");
+
+    /* ---- scheduler ---- */
+    hd_scheduler sched;
+    int n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
+    if (n_sigmas < req->steps + 1) {
+        hd_set_error("generate: derive_dev returned %d sigmas (need >= %d)",
+                     n_sigmas, req->steps + 1);
+        goto fail;
+    }
+    O1_TIMING_END("INPUT_PREPARE");
+
+    /* ---- denoising chain (dev/flash Euler) ---- */
+    float *noise_step = malloc(nimg * sizeof(float));
+    if (!noise_step) { hd_set_error("generate: oom noise_step"); goto fail; }
+    hd_torch_rng step_rng;
+    hd_torch_rng_seed(&step_rng, req->seed + 1);
+    O1_TIMING_BEGIN("DENOISE_TOTAL");
+    for (int i = 0; i < req->steps; i++) {
+        float t_pixeldit = 1.0f - sched.sigmas[i];
+        float sigma = sched.sigmas[i];
+        if (sigma < T_EPS) sigma = T_EPS;
+        cudaMemcpy(tsd, &t_pixeldit, 4, cudaMemcpyHostToDevice);
+
+        /* vinputs = cat([z, ref_patches]) */
+        cudaMemcpy(vinput_dev, z_prev_dev, nimg * 2, cudaMemcpyDeviceToDevice);
+        cudaMemcpy((char *)vinput_dev + nimg * 2, ref_dev,
+                   total_ref_tokens * FF * 2, cudaMemcpyDeviceToDevice);
+
+        st = hd_forward(&bw, &ws, (const int64_t *)idsd, text_len,
+                        (const float *)posd, maskd, vinput_dev, total_img,
+                        tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL,
+                        out_dev, NULL);
+        if (st != HD_OK) {
+            hd_set_error("generate: forward step %d: %s", i, hd_last_error());
+            free(noise_step);
+            goto fail;
+        }
+        /* target rows: out_dev[text_len : text_len+IMG] */
+        cudaMemcpy(xp_dev, (const char *)out_dev + (size_t)text_len * FF * 2,
+                   nimg * 2, cudaMemcpyDeviceToDevice);
+
+        hd_sched_vcond(z_prev_dev, xp_dev, sigma, mo_dev, (int)nimg);
+
+        /* per-step noise + Euler (dev/flash) */
+        hd_torch_randn_f32(&step_rng, noise_step, (int64_t)nimg);
+        float s_noise = req->noise_scale_start +
+                        (req->noise_scale_end - req->noise_scale_start) *
+                            (float)i / (float)(req->steps - 1);
+        float clip = req->noise_clip_std;
+        if (clip > 0.0f) {
+            double mean = 0.0, m2 = 0.0;
+            for (size_t k = 0; k < nimg; k++) mean += noise_step[k];
+            mean /= (double)nimg;
+            for (size_t k = 0; k < nimg; k++) {
+                double d = (double)noise_step[k] - mean;
+                m2 += d * d;
+            }
+            double std = sqrt(m2 / (double)(nimg - 1));
+            float clip_val = clip * (float)std;
+            for (size_t k = 0; k < nimg; k++) {
+                if (noise_step[k] > clip_val) noise_step[k] = clip_val;
+                else if (noise_step[k] < -clip_val) noise_step[k] = -clip_val;
+            }
+        }
+        cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
+
+        O1_TIMING_BEGIN_GPU("SCHEDULER");
+        st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev, s_noise,
+                               z_next_dev, (int)nimg, scratch);
+        O1_TIMING_END_GPU("SCHEDULER");
+        if (st != HD_OK) {
+            hd_set_error("generate: scheduler step %d: %s", i, hd_last_error());
+            free(noise_step);
+            goto fail;
+        }
+        cudaMemcpy(z_prev_dev, z_next_dev, nimg * 2, cudaMemcpyDeviceToDevice);
+        if (req->progress_cb) req->progress_cb(i + 1, req->steps, req->progress_user);
+    }
+    O1_TIMING_END("DENOISE_TOTAL");
+    free(noise_step);
+
+    /* ---- decode final z to RGB ---- */
+    O1_TIMING_BEGIN("OUTPUT_RECONSTRUCTION");
+    void *z_bf16_h = malloc(nimg * 2);
+    z_final = malloc(nimg * sizeof(float));
+    rgb = malloc((size_t)Hh * W * 3);
+    if (!z_final || !z_bf16_h || !rgb) {
+        hd_set_error("generate: oom decode");
+        free(z_final); free(z_bf16_h); free(rgb);
+        z_final = NULL; rgb = NULL;
+        goto fail;
+    }
+    cudaMemcpy(z_bf16_h, z_prev_dev, nimg * 2, cudaMemcpyDeviceToHost);
+    hd_bf16_buf_to_f32(z_bf16_h, z_final, nimg);
+    free(z_bf16_h);
+    int bad = 0;
+    for (size_t i = 0; i < nimg; i++) {
+        if (isnan(z_final[i]) || isinf(z_final[i])) { bad = 1; break; }
+    }
+    if (bad) {
+        hd_set_error("generate: final latent contains NaN/Inf");
+        free(z_final); free(rgb);
+        goto fail;
+    }
+    float mn = z_final[0], mx = z_final[0];
+    for (size_t i = 1; i < nimg; i++) {
+        if (z_final[i] < mn) mn = z_final[i];
+        if (z_final[i] > mx) mx = z_final[i];
+    }
+    if (mn < -2.0f || mx > 2.0f) {
+        hd_set_error("generate: final latent range [%.4f, %.4f] out of bounds",
+                     mn, mx);
+        free(z_final); free(rgb);
+        goto fail;
+    }
+    hd_decode_to_rgb(z_final, grid_h, grid_w, PATCH, 3, rgb);
+    free(z_final);
+    z_final = NULL;
+    O1_TIMING_END("OUTPUT_RECONSTRUCTION");
+
+    *out_rgb = rgb;
+    *out_w = W;
+    *out_h = Hh;
+
+    dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
+    dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
+    dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
+    dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev);
+    hd_forward_binding_free(&bw);
+    hd_weight_store_free(&store);
+    hd_sequence_free(&seq);
+    free(ref_patches);
+    return HD_OK;
+
+fail:
+    dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
+    dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
+    dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
+    dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev);
+    if (z_final) free(z_final);
+    if (rgb) free(rgb);
+    hd_forward_binding_free(&bw);
+    hd_weight_store_free(&store);
+    hd_sequence_free(&seq);
+    free(ref_patches);
+    return HD_ERR_MISSING;
+}
+
 hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
                       int device_id, unsigned char **out_rgb,
                       int *out_w, int *out_h) {
@@ -205,6 +641,10 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     *out_rgb = NULL;
     *out_w = *out_h = 0;
 
+    if (req->reference_count > 0) {
+        return hd_generate_ref(req, model_dir, device_id, out_rgb, out_w,
+                               out_h);
+    }
     if (req->mode != HD_MODE_T2I) {
         hd_set_error("generate: mode '%s' staged behind unified sequence "
                      "builder (M1-post.3); T2I is the production path",

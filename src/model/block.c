@@ -281,10 +281,14 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     if (sdpa) {
         int rc = hd_sdpa_execute(sdpa, q, k, v, mask_dev, sdpa_out, 0);
         if (rc != 0) {
-            hd_set_error("block: hd_sdpa_execute failed: %s", hd_cuda_errbuf());
-            return HD_ERR_RUNTIME;
+            /* cuDNN SDPA may reject non-standard shapes (e.g. large
+             * keep-original-aspect sequences); fall back to the eager
+             * reference backend rather than aborting generation. */
+            hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
+                               H, KV, S, D, scaling);
+        } else {
+            hd_head_merge(sdpa_out, as, S, H, D);
         }
-        hd_head_merge(sdpa_out, as, S, H, D);
     } else {
         hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
                            H, KV, S, D, scaling);

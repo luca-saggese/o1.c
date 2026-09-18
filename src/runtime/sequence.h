@@ -34,7 +34,7 @@
 extern "C" {
 #endif
 
-#define HD_SEQ_MAX_REFS 8
+#define HD_SEQ_MAX_REFS 10
 
 /* Per-reference geometry for hd_seq_build (oracle pipeline.py ref path). */
 typedef struct {

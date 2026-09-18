@@ -33,6 +33,9 @@ static void usage(const char *argv0) {
     printf("  --noise-end F           noise_scale_end (default 8.0)\n");
     printf("  --noise-clip F          noise_clip_std (default 8.0)\n");
     printf("  --lora FILE[:MULT]      apply LoRA adapter (repeatable)\n");
+    printf("  --ref-image PATH        reference image (repeatable, max 10)\n");
+    printf("  --keep-original-aspect  single ref: derive output dims from ref\n");
+    printf("  --layout-bboxes JSON    layout bboxes for personalize+layout\n");
     printf("\n");
     printf("M1.0 profile validation (default):\n");
     printf("  --config-dir DIR        config directory (default: config)\n");
@@ -112,6 +115,10 @@ int main(int argc, char **argv) {
     char lora_paths[8][512];
     float lora_mults[8];
     int lora_count = 0;
+    hd_reference_image refs[10];
+    int ref_count = 0;
+    int keep_original_aspect = 0;
+    const char *layout_bboxes = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -169,6 +176,18 @@ int main(int argc, char **argv) {
             lora_paths[lora_count][plen] = '\0';
             lora_mults[lora_count] = mult;
             lora_count++;
+        } else if (strcmp(argv[i], "--ref-image") == 0 && i + 1 < argc) {
+            if (ref_count >= 10) {
+                fprintf(stderr, "too many --ref-image (max 10)\n");
+                return 2;
+            }
+            refs[ref_count].path = argv[++i];
+            refs[ref_count].role = HD_REF_SUBJECT;
+            ref_count++;
+        } else if (strcmp(argv[i], "--keep-original-aspect") == 0) {
+            keep_original_aspect = 1;
+        } else if (strcmp(argv[i], "--layout-bboxes") == 0 && i + 1 < argc) {
+            layout_bboxes = argv[++i];
         } else if (strcmp(argv[i], "--inventory") == 0) {
             do_inventory = 1;
         } else if (strcmp(argv[i], "--probe") == 0) {
@@ -204,6 +223,21 @@ int main(int argc, char **argv) {
         req.noise_scale_end = noise_end;
         req.noise_clip_std = noise_clip;
         req.progress_cb = NULL;
+        req.references = ref_count > 0 ? refs : NULL;
+        req.reference_count = (size_t)ref_count;
+        req.keep_original_aspect = keep_original_aspect;
+
+        if (layout_bboxes) {
+            hd_layout_condition *layout_conds = NULL;
+            size_t n_layout = 0;
+            hd_status lst = hd_layout_parse(layout_bboxes, &layout_conds,
+                                            &n_layout);
+            if (lst != HD_OK) {
+                fprintf(stderr, "FAIL: layout bboxes: %s\n", hd_last_error());
+                return 1;
+            }
+            req.layout = layout_conds;
+        }
 
         if (lora_count > 0) {
             static hd_lora_spec lora_specs[8];
