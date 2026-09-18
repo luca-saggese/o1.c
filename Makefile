@@ -28,7 +28,7 @@ CUBIN      := build/obj/cuda
 CUDA_OBJS  := $(CUBIN)/support.o $(CUBIN)/norm.o $(CUBIN)/act.o \
               $(CUBIN)/gemm.o $(CUBIN)/rope.o $(CUBIN)/attn.o \
               $(CUBIN)/residual.o $(CUBIN)/embed.o $(CUBIN)/sched.o \
-              $(CUBIN)/hd_cudnn_sdpa.o
+              $(CUBIN)/hd_cudnn_sdpa.o $(CUBIN)/lora_merge.o
 TEST_P_BIN := build/test_primitives
 TEST_P_SRCS := tests/unit/test_primitives.c $(CORE_SRCS)
 TEST_P_OBJS := $(TEST_P_SRCS:.c=.o)
@@ -82,6 +82,7 @@ TEST_M15_OBJS := $(TEST_M15_SRCS:.c=.o)
 
 SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c \
              src/model/forward.c src/model/scheduler.c src/model/tokenizer.c \
+             src/model/lora.c \
              src/runtime/sequence.c src/runtime/request.c src/runtime/decode.c \
              src/runtime/torch_rng.c src/runtime/generate.c src/io/png_wrap.c \
              src/image/hd_image.c src/image/layout.c src/runtime/o1_timing.c
@@ -378,6 +379,10 @@ timing: $(TIMING_BIN)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
 $(CUBIN)/%.o: src/cuda/%.cu
+	@mkdir -p $(CUBIN)
+	$(NVCC) -arch=sm_121 -O2 -std=c++17 $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
+# LoRA GPU merge lives under src/model/ (not src/cuda/).
+$(CUBIN)/lora_merge.o: src/model/lora_merge.cu
 	@mkdir -p $(CUBIN)
 	$(NVCC) -arch=sm_121 -O2 -std=c++17 $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
 # cuDNN SDPA wrapper: the vendored C++ Frontend is header-only and heavy to

@@ -42,6 +42,7 @@
 #include "tokenizer.h"
 #include "torch_rng.h"
 #include "weights.h"
+#include "hd_lora.h"
 
 #define NLAYERS 36
 #define H 4096
@@ -307,6 +308,22 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         hd_weight_store_free(&store);
         hd_sequence_free(&decks[0]);
         return st;
+    }
+
+    /* ---- LoRA merge-on-load (optional) ----
+     * Applies adapters to the resident base weights in place, then the
+     * normal cuBLAS forward path runs unchanged. */
+    if (req->lora) {
+        O1_TIMING_BEGIN("LORA_APPLY");
+        st = hd_lora_apply(req->lora, &store, device_id);
+        O1_TIMING_END("LORA_APPLY");
+        if (st != HD_OK) {
+            hd_set_error("generate: lora: %s", hd_lora_last_error());
+            hd_forward_binding_free(&bw);
+            hd_weight_store_free(&store);
+            hd_sequence_free(&decks[0]);
+            return st;
+        }
     }
 
     /* ---- workspace ----

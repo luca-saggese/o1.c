@@ -17,6 +17,7 @@
 
 #include "hidream.h"
 #include "../image/layout.h"
+#include "../../include/hd_lora.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,6 +111,8 @@ typedef struct {
 
     hd_progress_callback progress_cb;
     void *progress_user;
+
+    const hd_lora_config *lora;   /* may be NULL; applied after weight load */
 } hd_generation_request;
 
 /*

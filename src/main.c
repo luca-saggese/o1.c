@@ -32,6 +32,7 @@ static void usage(const char *argv0) {
     printf("  --noise-start F         noise_scale_start (default 8.0)\n");
     printf("  --noise-end F           noise_scale_end (default 8.0)\n");
     printf("  --noise-clip F          noise_clip_std (default 8.0)\n");
+    printf("  --lora FILE[:MULT]      apply LoRA adapter (repeatable)\n");
     printf("\n");
     printf("M1.0 profile validation (default):\n");
     printf("  --config-dir DIR        config directory (default: config)\n");
@@ -107,6 +108,10 @@ int main(int argc, char **argv) {
     hd_scheduler_kind sched = HD_SCHED_DEFAULT; /* sentinel: "not set" */
     float guidance = -1.0f, shift = -1.0f;
     float noise_start = 0.0f, noise_end = 0.0f, noise_clip = 0.0f;
+    hd_lora_config lora_cfg = {0};
+    char lora_paths[8][512];
+    float lora_mults[8];
+    int lora_count = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -143,6 +148,27 @@ int main(int argc, char **argv) {
             noise_end = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--noise-clip") == 0 && i + 1 < argc) {
             noise_clip = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--lora") == 0 && i + 1 < argc) {
+            if (lora_count >= 8) {
+                fprintf(stderr, "too many --lora (max 8)\n");
+                return 2;
+            }
+            const char *arg = argv[++i];
+            const char *colon = strchr(arg, ':');
+            float mult = 1.0f;
+            size_t plen = strlen(arg);
+            if (colon) {
+                plen = (size_t)(colon - arg);
+                mult = (float)atof(colon + 1);
+            }
+            if (plen == 0 || plen >= sizeof(lora_paths[0])) {
+                fprintf(stderr, "invalid --lora: %s\n", arg);
+                return 2;
+            }
+            memcpy(lora_paths[lora_count], arg, plen);
+            lora_paths[lora_count][plen] = '\0';
+            lora_mults[lora_count] = mult;
+            lora_count++;
         } else if (strcmp(argv[i], "--inventory") == 0) {
             do_inventory = 1;
         } else if (strcmp(argv[i], "--probe") == 0) {
@@ -178,6 +204,17 @@ int main(int argc, char **argv) {
         req.noise_scale_end = noise_end;
         req.noise_clip_std = noise_clip;
         req.progress_cb = NULL;
+
+        if (lora_count > 0) {
+            static hd_lora_spec lora_specs[8];
+            for (int k = 0; k < lora_count; k++) {
+                lora_specs[k].path = lora_paths[k];
+                lora_specs[k].multiplier = lora_mults[k];
+            }
+            lora_cfg.items = lora_specs;
+            lora_cfg.count = (size_t)lora_count;
+            req.lora = &lora_cfg;
+        }
 
         hd_request_defaults(&req);
         if (req.width <= 0) req.width = 1024;
