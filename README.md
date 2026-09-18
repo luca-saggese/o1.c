@@ -156,7 +156,9 @@ build/hidream [options]
   --model dev|base        profile to use (default: dev)
   --prompt TEXT           user prompt
   --mode t2i|edit|personalize|...   generation mode (default: t2i)
-  --ref-image PATH        reference image (repeatable, edit/personalize)
+  --ref-image PATH        reference image (repeatable, max 10)
+  --keep-original-aspect  single ref: derive output dims from ref
+  --layout-bboxes JSON    layout bboxes for personalize+layout
   --width N               output width (default: 1024)
   --height N              output height (default: 1024)
   --steps N               inference steps (default per profile)
@@ -167,6 +169,7 @@ build/hidream [options]
   --noise-start F         noise_scale_start (default 8.0)
   --noise-end F           noise_scale_end (default 8.0)
   --noise-clip F          noise_clip_std (default 8.0)
+  --lora FILE[:MULT]      apply LoRA adapter (repeatable)
   --output PATH           output PNG path (default: output.png)
   --model-dir DIR         override profile local_path; a path ending in
                           .gguf loads the materialized GGUF weight pack
@@ -179,6 +182,15 @@ Example:
 ./build/hidream --model dev --prompt "a teapot" --steps 28 --seed 123456 \
   --output out.png
 ```
+
+## Generation examples
+
+Runnable native CLI examples for every official HiDream-O1 generation type
+(Text-to-Image, Instruction-Based Editing, Multi-Reference Personalization,
+Personalization + Skeleton, Personalization + Layout, keep-original-aspect)
+are in [`example_assets/README.md`](example_assets/README.md), using the
+upstream sample assets and prompts. Each example includes the exact command
+and the generated output image.
 
 ## Test suite
 
