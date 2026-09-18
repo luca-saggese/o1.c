@@ -31,6 +31,7 @@ typedef enum {
     HD_ERR_MISSING = 6,   /* required local path absent (e.g. weights) */
     HD_ERR_OOM = 7,       /* allocation failure */
     HD_ERR_RUNTIME = 8,   /* runtime/backend failure (e.g. cuDNN SDPA) */
+    HD_ERR_UNSUPPORTED = 9, /* feature/target not supported (fails closed) */
 } hd_status;
 
 const char *hd_last_error(void);
