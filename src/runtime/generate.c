@@ -210,9 +210,9 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
                      hd_mode_name(req->mode));
         return HD_ERR_MISSING;
     }
-    if (req->scheduler != HD_SCHED_FLASH) {
-        hd_set_error("generate: scheduler '%s' staged behind scheduler "
-                     "matrix (M1-post.2); flash is the Dev production path",
+    if (req->scheduler != HD_SCHED_FLASH && req->scheduler != HD_SCHED_DEFAULT) {
+        hd_set_error("generate: scheduler '%s' unsupported (flash for dev, "
+                     "default for base)",
                      hd_scheduler_name(req->scheduler));
         return HD_ERR_MISSING;
     }
@@ -226,31 +226,52 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     }
     int IMG = grid_h * grid_w;
     size_t nimg = (size_t)IMG * FF;
+    int use_cfg = (req->scheduler == HD_SCHED_DEFAULT) && (req->guidance_scale > 1.0f);
 
-    /* ---- tokenize prompt -> sequence ---- */
+    /* ---- tokenize prompt -> conditional sequence ----
+       nbranch=1 (conditional) for flash; nbranch=2 (conditional + unconditional
+       " ") for the base/default CFG path. The unconditional branch mirrors the
+       oracle `build_t2i_text_sample(" ")` (empty caption). */
     O1_TIMING_BEGIN("PROMPT_TOKENIZE");
-    int64_t *ids = NULL;
-    int text_len = 0;
-    hd_status st = build_t2i_ids(req->prompt, &ids, &text_len);
-    if (st != HD_OK) {
-        hd_set_error("generate: tokenize: %s", hd_last_error());
-        return st;
-    }
-    hd_sequence seq;
-    st = hd_seq_t2i(ids, text_len, Hh, W, PATCH, 151655, 151656, 151652,
-                    TMS_ID, 1, 1, 4096, &seq);
-    free(ids);
-    if (st != HD_OK) {
-        hd_set_error("generate: sequence: %s", hd_last_error());
-        return st;
+    int nbranch = use_cfg ? 2 : 1;
+    hd_sequence decks[2];
+    for (int b = 0; b < 2; b++) memset(&decks[b], 0, sizeof(decks[b]));
+    int seq_text_len[2], seq_S[2];
+    const char *cap[2] = { req->prompt, " " };
+    hd_status st;
+
+    for (int b = 0; b < nbranch; b++) {
+        int64_t *ids = NULL;
+        int tlen = 0;
+        st = build_t2i_ids(cap[b], &ids, &tlen);
+        if (st != HD_OK) {
+            hd_set_error("generate: tokenize: %s", hd_last_error());
+            return st;
+        }
+        st = hd_seq_t2i(ids, tlen, Hh, W, PATCH, 151655, 151656, 151652,
+                        TMS_ID, 1, 1, 4096, &decks[b]);
+        free(ids);
+        if (st != HD_OK) {
+            hd_set_error("generate: sequence: %s", hd_last_error());
+            for (int q = 0; q < b; q++) hd_sequence_free(&decks[q]);
+            return st;
+        }
+        if (decks[b].image_len != IMG) {
+            hd_set_error("generate: sequence image_len %d != %d",
+                         decks[b].image_len, IMG);
+            for (int q = 0; q <= b; q++) hd_sequence_free(&decks[q]);
+            return HD_ERR_MISMATCH;
+        }
+        seq_text_len[b] = decks[b].text_len;
+        seq_S[b] = decks[b].S;
     }
     O1_TIMING_END("PROMPT_TOKENIZE");
-    int S = seq.S;
-    if (seq.image_len != IMG) {
-        hd_set_error("generate: sequence image_len %d != %d", seq.image_len, IMG);
-        hd_sequence_free(&seq);
-        return HD_ERR_MISMATCH;
-    }
+
+    /* canonical (conditional) deck drives workspace sizing & output decode */
+    int S = seq_S[0];
+    int text_len = seq_text_len[0];
+    int seq_S_uncond = seq_S[1], seq_text_len_uncond = seq_text_len[1];
+    int text_len_uncond = seq_text_len[1];
 
     /* ---- load weights ---- */
     O1_TIMING_BEGIN("INPUT_PREPARE");
@@ -261,21 +282,21 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         st = hd_weights_to_device_gguf(model_dir, device_id, &store);
         if (st != HD_OK) {
             hd_set_error("generate: weights: %s", hd_weights_last_error());
-            hd_sequence_free(&seq);
+            hd_sequence_free(&decks[0]);
             return st;
         }
     } else {
         hd_st_index idx;
         if (hd_st_index_load(model_dir, &idx) != HD_OK) {
             hd_set_error("generate: index: %s", hd_st_last_error());
-            hd_sequence_free(&seq);
+            hd_sequence_free(&decks[0]);
             return HD_ERR_IO;
         }
         st = hd_weights_to_device(model_dir, &idx, device_id, &store);
         hd_st_index_free(&idx);
         if (st != HD_OK) {
             hd_set_error("generate: weights: %s", hd_weights_last_error());
-            hd_sequence_free(&seq);
+            hd_sequence_free(&decks[0]);
             return st;
         }
     }
@@ -284,20 +305,31 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     if (st != HD_OK) {
         hd_set_error("generate: resolve: %s", hd_last_error());
         hd_weight_store_free(&store);
-        hd_sequence_free(&seq);
+        hd_sequence_free(&decks[0]);
         return st;
     }
 
-    /* ---- workspace ---- */
-    int64_t scratch_bytes = 0;
+    /* ---- workspace ----
+       Two forward contexts: the canonical conditional deck and (with CFG)
+       the unconditional deck. Both share one arena: the canonical deck takes
+       the front, the unconditional deck is laid out after it. The canonical
+       ws.sdpa is pointed at the conditional plan by the SDPA block below. */
+    int64_t scratch_bytes = 0, scratch_bytes_un = 0;
     int64_t ws_bytes = hd_forward_workspace_bytes(S, IMG, NH, NKV, H, I, HD,
                                                   &scratch_bytes);
-    void *wsbase = dev_alloc((size_t)ws_bytes);
+    int64_t ws_bytes_un = 0;
+    if (use_cfg) {
+        ws_bytes_un = hd_forward_workspace_bytes(seq_S_uncond, IMG, NH, NKV,
+                                                 H, I, HD, &scratch_bytes_un);
+    }
+    int64_t ws_total = ws_bytes + ws_bytes_un;
+    void *wsbase = dev_alloc((size_t)ws_total);
     if (!wsbase) {
-        hd_set_error("generate: workspace alloc %lld bytes", (long long)ws_bytes);
+        hd_set_error("generate: workspace alloc %lld bytes", (long long)ws_total);
         hd_forward_binding_free(&bw);
         hd_weight_store_free(&store);
-        hd_sequence_free(&seq);
+        hd_sequence_free(&decks[0]);
+        if (use_cfg) hd_sequence_free(&decks[1]);
         return HD_ERR_OOM;
     }
     hd_forward_workspace ws;
@@ -305,68 +337,106 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     ws.hidden_a = wsbase;
     ws.block_scratch_bytes = scratch_bytes;
 
+    hd_forward_workspace ws_uncond;
+    memset(&ws_uncond, 0, sizeof(ws_uncond));
+    ws_uncond.hidden_a = (void *)((uint8_t *)wsbase + ws_bytes);
+    ws_uncond.block_scratch_bytes = scratch_bytes_un;
+
     /* ---- cuDNN SDPA attention plan (M2 pre-baseline) ----
-     * Built once for the fixed shape (S, NH, NKV, HD) and reused for every
+     * Built once for each distinct sequence length (the conditional S and,
+     * when CFG is active, the shorter unconditional S). Reused for every
      * denoise step. On failure we fall back to the eager reference backend
      * (ws.sdpa stays NULL) rather than aborting generation. */
     {
-        hd_sdpa_plan *plan = NULL;
-        float attn_scale = (float)(1.0 / sqrt((double)HD));
-        int rc = hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);
-#ifdef O1_DEBUG_TIMING
-        fprintf(stderr, "[timing] sdpa_create rc=%d S=%d -> %s\n", rc, S,
-                rc == 0 ? "SDPA ACTIVE" : "eager fallback");
-#endif
-        if (rc == 0) {
-            ws.sdpa = plan;
-        } else {
-            hd_set_error("generate: sdpa plan disabled (%s); using eager reference",
-                         hd_cuda_errbuf());
-            ws.sdpa = NULL;
+        for (int b = 0; b < nbranch; b++) {
+            hd_sdpa_plan *plan = NULL;
+            int Ss = seq_S[b];
+            float attn_scale = (float)(1.0 / sqrt((double)HD));
+            int rc = hd_sdpa_create(&plan, 1, NH, NKV, Ss, Ss, HD, attn_scale);
+            if (rc != 0) {
+                hd_set_error("generate: sdpa plan disabled (%s); using eager reference",
+                             hd_cuda_errbuf());
+                if (plan) hd_sdpa_destroy(plan);
+                plan = NULL;
+            }
+            if (b == 0) ws.sdpa = plan; else ws_uncond.sdpa = plan;
         }
     }
 
-    /* ---- stage device inputs ---- */
-    void *posd = dev_alloc((size_t)3 * S * 4);
-    void *maskd = dev_alloc((size_t)S * S * 2);
-    void *idsd = dev_alloc((size_t)text_len * 8);
+    /* ---- stage device inputs (one buffer set per branch) ---- */
+    void *posd[2] = {NULL, NULL};
+    void *maskd[2] = {NULL, NULL};
+    void *idsd[2] = {NULL, NULL};
     int64_t sec_host[3] = {24, 20, 20};
     void *secd = dev_alloc(sizeof(sec_host));
-    if (!posd || !maskd || !idsd || !secd) {
-        hd_set_error("generate: input alloc oom");
-        hd_forward_binding_free(&bw);
-        hd_weight_store_free(&store);
-        hd_sequence_free(&seq);
-        dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
-        dev_free(secd);
-        return HD_ERR_OOM;
+    for (int b = 0; b < nbranch; b++) {
+        int Ss = seq_S[b];
+        posd[b] = dev_alloc((size_t)3 * Ss * 4);
+        maskd[b] = dev_alloc((size_t)Ss * Ss * 2);
+        idsd[b] = dev_alloc((size_t)seq_text_len[b] * 8);
+        if (!posd[b] || !maskd[b] || !idsd[b] || !secd) {
+            hd_set_error("generate: input alloc oom");
+            hd_forward_binding_free(&bw);
+            hd_weight_store_free(&store);
+            for (int q = 0; q < nbranch; q++) hd_sequence_free(&decks[q]);
+            dev_free(wsbase); dev_free(secd);
+            dev_free(posd[0]); dev_free(maskd[0]); dev_free(idsd[0]);
+            dev_free(posd[1]); dev_free(maskd[1]); dev_free(idsd[1]);
+            return HD_ERR_OOM;
+        }
+        cudaMemcpy(posd[b], decks[b].pos_f32, (size_t)3 * Ss * 4,
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(maskd[b], decks[b].mask_bf16, (size_t)Ss * Ss * 2,
+                   cudaMemcpyHostToDevice);
+        cudaMemcpy(idsd[b], decks[b].input_ids, (size_t)seq_text_len[b] * 8,
+                   cudaMemcpyHostToDevice);
     }
-    cudaMemcpy(posd, seq.pos_f32, (size_t)3 * S * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(maskd, seq.mask_bf16, (size_t)S * S * 2, cudaMemcpyHostToDevice);
-    cudaMemcpy(idsd, seq.input_ids, (size_t)text_len * 8, cudaMemcpyHostToDevice);
     cudaMemcpy(secd, sec_host, sizeof(sec_host), cudaMemcpyHostToDevice);
 
     /* ---- device buffers ---- */
     void *z_prev_dev = NULL;
     void *z_next_dev = NULL;
-    float *mo_dev = NULL;
+    float *z_f32_dev = NULL;
+    float *mo_dev = NULL;      /* conditioned v-guide (fp32) */
+    float *mo_uncond_dev = NULL;
     float *noise_dev = NULL;
     float *scratch = NULL;
     float *tsd = NULL;
     void *out_dev = NULL;
     void *xp_dev = NULL;
+    void *out_uncond_dev = NULL;   /* unconditional branch output     */
+    void *xp_uncond_dev = NULL;     /* unconditional branch x_pred     */
+    float *scratch_uncond = NULL;   /* Euler scratch for uncond step   */
+    float *z_cfg_dev = NULL;        /* CFG combine scratch (unused now) */
+    /* UniPC persistent history */
+    void *unipc_hist_dev = NULL;   /* [3 * nimg * 4] cur/prev1/prev2 fp32  */
+    void *unipc_last_dev = NULL;   /* [nimg*4] last_sample fp32 (pre-pred) */
     float *z_final = NULL;
     unsigned char *rgb = NULL;
     z_prev_dev = dev_alloc(nimg * 2);
     z_next_dev = dev_alloc(nimg * 2);
+    z_f32_dev = dev_alloc(nimg * 4);
     mo_dev = dev_alloc(nimg * 4);
+    mo_uncond_dev = dev_alloc(nimg * 4);
     noise_dev = dev_alloc(nimg * 4);
     scratch = dev_alloc(3 * nimg * 4);
     tsd = dev_alloc(4);
     out_dev = dev_alloc((size_t)S * FF * 2);
     xp_dev = dev_alloc(nimg * 2);
-    if (!z_prev_dev || !z_next_dev || !mo_dev || !noise_dev || !scratch ||
-        !tsd || !out_dev || !xp_dev) {
+    out_uncond_dev = dev_alloc((size_t)seq_S_uncond * FF * 2);
+    xp_uncond_dev = dev_alloc(nimg * 2);
+    scratch_uncond = dev_alloc(3 * nimg * 4);
+    z_cfg_dev = dev_alloc(nimg * 4);
+    if (req->scheduler == HD_SCHED_DEFAULT) {
+        unipc_hist_dev = dev_alloc(3 * nimg * 4);   /* cur/prev1/prev2 */
+        unipc_last_dev = dev_alloc(nimg * 4);
+    }
+    if (!z_prev_dev || !z_next_dev || !z_f32_dev || !mo_dev || !noise_dev ||
+        !scratch || !tsd || !out_dev || !xp_dev || !mo_uncond_dev ||
+        (use_cfg && (!out_uncond_dev || !xp_uncond_dev || !scratch_uncond ||
+                     !z_cfg_dev)) ||
+        (req->scheduler == HD_SCHED_DEFAULT &&
+         (!unipc_hist_dev || !unipc_last_dev))) {
         hd_set_error("generate: device alloc oom");
         goto fail;
     }
@@ -379,16 +449,21 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     gen_initial_noise(req->seed, W, Hh, noise_h);
     pixel_unshuffle(noise_h, Hh, W, grid_h, grid_w, z_h);
     for (size_t i = 0; i < nimg; i++) z_h[i] *= req->noise_scale_start;
-    cudaMemcpy(z_prev_dev, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
-    hd_f32_convert_bf16(z_prev_dev, z_prev_dev, (int)nimg);
+    cudaMemcpy(z_f32_dev, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
+    hd_f32_convert_bf16(z_f32_dev, z_prev_dev, (int)nimg);
     free(noise_h); free(z_h);
     O1_TIMING_END("INITIAL_NOISE");
 
     /* ---- scheduler ---- */
     hd_scheduler sched;
-    int n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
+    int n_sigmas;
+    if (req->scheduler == HD_SCHED_DEFAULT)
+        n_sigmas = hd_scheduler_derive_default(&sched, req->steps, req->shift,
+                                               req->noise_clip_std);
+    else
+        n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
     if (n_sigmas < req->steps + 1) {
-        hd_set_error("generate: derive_dev returned %d sigmas (need >= %d)",
+        hd_set_error("generate: derive returned %d sigmas (need >= %d)",
                      n_sigmas, req->steps + 1);
         goto fail;
     }
@@ -398,11 +473,25 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     float *noise_step = malloc(nimg * sizeof(float));
     if (!noise_step) { hd_set_error("generate: oom noise_step"); goto fail; }
     /* oracle noise: single global generator seeded seed+1, drawn in sequence
-     * per step (initial noise uses its own generator seed+1; then
-     * torch.manual_seed(seed+1) reseeds the global generator and each step
-     * draws randn_like(z) in sequence). */
+     * per flash step; the default (UniPC) path draws NO per-step noise. */
     hd_torch_rng step_rng;
     hd_torch_rng_seed(&step_rng, req->seed + 1);
+
+    /* UniPC persistent history (base/default path): ring of converted
+       model outputs (ORDER=2) + last_sample. We mirror the oracle's
+       model_outputs ring as two device slots (prev and prev2) plus a current
+       conv scratch. Scratch aliases the scheduler scratch buffers. */
+    float *unipc_scratch = scratch;               /* [3*nimg] fp32          */
+    float *unipc_cur = unipc_scratch;              /* conv pointwise output  */
+    float *unipc_corr = unipc_scratch + nimg;      /* corrected sample       */
+    float *unipc_prev = unipc_scratch + 2 * nimg;  /* predictor output       */
+    float *unipc_slot_0 = (float *)unipc_hist_dev;            /* conv_t      */
+    float *unipc_slot_1 = (float *)unipc_hist_dev + nimg;     /* conv_{t-1}  */
+    float *unipc_slot_2 = (float *)unipc_hist_dev + 2 * nimg; /* conv_{t-2}  */
+    int unipc_lower = 0;   /* warmup counter */
+    int unipc_this = 0;    /* last predictor order (0 -> no corrector) */
+    int have_hist = 0;     /* model_outputs history present */
+
     O1_TIMING_BEGIN("DENOISE_TOTAL");
     for (int i = 0; i < req->steps; i++) {
         float t_pixeldit = 1.0f - sched.sigmas[i];
@@ -410,8 +499,9 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         if (sigma < T_EPS) sigma = T_EPS;
         cudaMemcpy(tsd, &t_pixeldit, 4, cudaMemcpyHostToDevice);
 
-        st = hd_forward(&bw, &ws, (const int64_t *)idsd, text_len,
-                        (const float *)posd, maskd, z_prev_dev, IMG, tsd,
+        /* ---- conditional forward ---- */
+        st = hd_forward(&bw, &ws, (const int64_t *)idsd[0], text_len,
+                        (const float *)posd[0], maskd[0], z_prev_dev, IMG, tsd,
                         secd, S, NH, NKV, H, I, HD, TMS_ID, NULL, out_dev,
                         NULL);
         if (st != HD_OK) {
@@ -422,44 +512,124 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         cudaMemcpy(xp_dev, (const char *)out_dev + (size_t)text_len * FF * 2,
                    nimg * 2, cudaMemcpyDeviceToDevice);
 
-        /* v_cond = (xp - z)/sigma; model_output = -v_guided (no CFG) */
+        /* v_cond = (xp - z)/sigma; model_output = -v_guided */
         hd_sched_vcond(z_prev_dev, xp_dev, sigma, mo_dev, (int)nimg);
 
-        /* per-step noise: randn_like(z) drawn in sequence from the global
-         * generator (seeded seed+1 once), clamped to
-         * +/-noise_clip_std*noise.std() (oracle dynamic clamp), scaled by
-         * noise_scale_schedule[i] */
-        hd_torch_randn_f32(&step_rng, noise_step, (int64_t)nimg);
-        float s_noise = req->noise_scale_start +
-                        (req->noise_scale_end - req->noise_scale_start) *
-                            (float)i / (float)(req->steps - 1);
-        float clip = req->noise_clip_std;
-        if (clip > 0.0f) {
-            /* unbiased sample std (torch.std default) */
-            double mean = 0.0, m2 = 0.0;
-            for (size_t k = 0; k < nimg; k++) mean += noise_step[k];
-            mean /= (double)nimg;
-            for (size_t k = 0; k < nimg; k++) {
-                double d = (double)noise_step[k] - mean;
-                m2 += d * d;
+        if (req->scheduler == HD_SCHED_DEFAULT) {
+            /* ---- base/default: CFG dual forward + FlowUniPC ----
+               If guidance>1 run the unconditional branch and combine
+               pred = uncond + g*(cond - uncond)  (= -v_guided). */
+            if (use_cfg) {
+                st = hd_forward(&bw, &ws_uncond,
+                                (const int64_t *)idsd[1], seq_text_len[1],
+                                (const float *)posd[1], maskd[1], z_prev_dev,
+                                IMG, tsd, secd, seq_S_uncond, NH, NKV, H, I,
+                                HD, TMS_ID, NULL, out_uncond_dev, NULL);
+                if (st != HD_OK) {
+                    hd_set_error("generate: forward(uncond) step %d: %s",
+                                 i, hd_last_error());
+                    free(noise_step);
+                    goto fail;
+                }
+                cudaMemcpy(xp_uncond_dev,
+                           (const char *)out_uncond_dev +
+                               (size_t)seq_text_len[1] * FF * 2,
+                           nimg * 2, cudaMemcpyDeviceToDevice);
+                hd_sched_vcond(z_prev_dev, xp_uncond_dev, sigma,
+                               mo_uncond_dev, (int)nimg);
+                hd_sched_cfg_guided(mo_dev, mo_uncond_dev, req->guidance_scale,
+                                    mo_dev, (int)nimg);
             }
-            double std = sqrt(m2 / (double)(nimg - 1));
-            float clip_val = clip * (float)std;
-            for (size_t k = 0; k < nimg; k++) {
-                if (noise_step[k] > clip_val) noise_step[k] = clip_val;
-                else if (noise_step[k] < -clip_val) noise_step[k] = -clip_val;
-            }
-        }
-        cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
 
-        O1_TIMING_BEGIN_GPU("SCHEDULER");
-        st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev, s_noise,
-                               z_next_dev, (int)nimg, scratch);
-        O1_TIMING_END_GPU("SCHEDULER");
-        if (st != HD_OK) {
-            hd_set_error("generate: scheduler step %d: %s", i, hd_last_error());
-            free(noise_step);
-            goto fail;
+            /* plan UniPC corrective step (host scalars) */
+            hd_unipc_plan plan;
+            hd_scheduler_unipc_plan(&sched, i, unipc_this, unipc_lower, &plan);
+
+            /* upcast current sample z (bf16 -> fp32) into unipc_scratch's
+               sample slot; use mo_dev (guided) as the current model output. */
+            float *z_f32 = unipc_prev;   /* reuse predictor out buffer after */
+            hd_sched_bf16_upcast(z_prev_dev, z_f32, (int)nimg);
+
+            /* convert_model_output: conv = sample - sigma_cur*mo.
+               Write conv_t into slot 0 (rotated below to the right history). */
+            hd_unipc_convert(z_f32, mo_dev, sched.sigmas[i], unipc_cur,
+                             (int)nimg);
+            cudaMemcpy(unipc_slot_0, unipc_cur, nimg * 4, cudaMemcpyDeviceToDevice);
+
+            /* corrector (si>0 && this_order>0 && history present): uses
+               m0=conv_{t-1}, m_old=conv_{t-2}, model_t=conv_t. */
+            if (i > 0 && unipc_this > 0 && have_hist) {
+                hd_unipc_correct((float *)unipc_last_dev, unipc_slot_1,
+                                 unipc_slot_2, unipc_cur,
+                                 (float)plan.c_sig_t, (float)plan.c_sig_s0,
+                                 (float)plan.c_alpha_t,
+                                 (float)plan.c_h_phi_1, (float)plan.c_B_h,
+                                 (float)plan.c_rhos0, (float)plan.c_rhos1,
+                                 (float)plan.c_inv_rks0, plan.corr_order,
+                                 unipc_corr, (int)nimg);
+            } else {
+                cudaMemcpy(unipc_corr, z_f32, nimg * 4, cudaMemcpyDeviceToDevice);
+            }
+
+            /* store last_sample = post-corrector sample (pre-predictor) */
+            cudaMemcpy((float *)unipc_last_dev, unipc_corr, nimg * 4,
+                       cudaMemcpyDeviceToDevice);
+
+            /* predictor: m0=conv_t, m_old=conv_{t-1} */
+            hd_unipc_predict(unipc_corr, unipc_slot_0, unipc_slot_1,
+                             (float)plan.p_sig_t,
+                             (float)plan.p_sig_s0, (float)plan.p_alpha_t,
+                             (float)plan.p_h_phi_1, (float)plan.p_B_h,
+                             (float)plan.p_rhos_p, (float)plan.p_inv_rks0,
+                             plan.pred_order, unipc_prev, (int)nimg);
+
+            /* cast prev_sample to bf16 z_next */
+            hd_f32_convert_bf16(unipc_prev, z_next_dev, (int)nimg);
+
+            /* rotate history: conv_{t} -> slot1, conv_{t-1} -> slot2 */
+            cudaMemcpy(unipc_slot_2, unipc_slot_1, nimg * 4,
+                       cudaMemcpyDeviceToDevice);
+            cudaMemcpy(unipc_slot_1, unipc_slot_0, nimg * 4,
+                       cudaMemcpyDeviceToDevice);
+
+            /* advance persistent state */
+            unipc_this = plan.next_this_order;
+            unipc_lower = plan.next_lower_order;
+            have_hist = 1;
+        } else {
+            /* ---- dev/flash: per-step noise + Euler ---- */
+            hd_torch_randn_f32(&step_rng, noise_step, (int64_t)nimg);
+            float s_noise = req->noise_scale_start +
+                            (req->noise_scale_end - req->noise_scale_start) *
+                                (float)i / (float)(req->steps - 1);
+            float clip = req->noise_clip_std;
+            if (clip > 0.0f) {
+                double mean = 0.0, m2 = 0.0;
+                for (size_t k = 0; k < nimg; k++) mean += noise_step[k];
+                mean /= (double)nimg;
+                for (size_t k = 0; k < nimg; k++) {
+                    double d = (double)noise_step[k] - mean;
+                    m2 += d * d;
+                }
+                double std = sqrt(m2 / (double)(nimg - 1));
+                float clip_val = clip * (float)std;
+                for (size_t k = 0; k < nimg; k++) {
+                    if (noise_step[k] > clip_val) noise_step[k] = clip_val;
+                    else if (noise_step[k] < -clip_val) noise_step[k] = -clip_val;
+                }
+            }
+            cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
+
+            O1_TIMING_BEGIN_GPU("SCHEDULER");
+            st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev,
+                                   s_noise, z_next_dev, (int)nimg, scratch);
+            O1_TIMING_END_GPU("SCHEDULER");
+            if (st != HD_OK) {
+                hd_set_error("generate: scheduler step %d: %s",
+                             i, hd_last_error());
+                free(noise_step);
+                goto fail;
+            }
         }
         cudaMemcpy(z_prev_dev, z_next_dev, nimg * 2, cudaMemcpyDeviceToDevice);
 
@@ -514,24 +684,48 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     *out_w = W;
     *out_h = Hh;
 
-    dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
+    dev_free(wsbase);
+    dev_free(posd[0]); dev_free(maskd[0]); dev_free(idsd[0]);
+    dev_free(posd[1]); dev_free(maskd[1]); dev_free(idsd[1]);
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
-    dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
+    dev_free(z_f32_dev);
+    dev_free(mo_dev); dev_free(mo_uncond_dev); dev_free(noise_dev);
+    dev_free(scratch); dev_free(tsd);
     dev_free(out_dev); dev_free(xp_dev);
+    dev_free(out_uncond_dev); dev_free(xp_uncond_dev);
+    dev_free(scratch_uncond); dev_free(z_cfg_dev);
+    if (req->scheduler == HD_SCHED_DEFAULT) {
+        dev_free(unipc_hist_dev); dev_free(unipc_last_dev);
+        if (ws.sdpa) hd_sdpa_destroy(ws.sdpa);
+        if (use_cfg && ws_uncond.sdpa) hd_sdpa_destroy(ws_uncond.sdpa);
+    } else {
+        if (ws.sdpa) hd_sdpa_destroy(ws.sdpa);
+    }
     hd_forward_binding_free(&bw);
     hd_weight_store_free(&store);
-    hd_sequence_free(&seq);
+    hd_sequence_free(&decks[0]);
+    if (nbranch > 1) hd_sequence_free(&decks[1]);
     return HD_OK;
 
 fail:
-    dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
+    dev_free(wsbase);
+    dev_free(posd[0]); dev_free(maskd[0]); dev_free(idsd[0]);
+    dev_free(posd[1]); dev_free(maskd[1]); dev_free(idsd[1]);
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
-    dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
+    dev_free(z_f32_dev);
+    dev_free(mo_dev); dev_free(mo_uncond_dev); dev_free(noise_dev);
+    dev_free(scratch); dev_free(tsd);
     dev_free(out_dev); dev_free(xp_dev);
+    dev_free(out_uncond_dev); dev_free(xp_uncond_dev);
+    dev_free(scratch_uncond); dev_free(z_cfg_dev);
+    dev_free(unipc_hist_dev); dev_free(unipc_last_dev);
+    if (ws.sdpa) hd_sdpa_destroy(ws.sdpa);
+    if (use_cfg && ws_uncond.sdpa) hd_sdpa_destroy(ws_uncond.sdpa);
     if (z_final) free(z_final);
     if (rgb) free(rgb);
     hd_forward_binding_free(&bw);
     hd_weight_store_free(&store);
-    hd_sequence_free(&seq);
+    hd_sequence_free(&decks[0]);
+    if (nbranch > 1) hd_sequence_free(&decks[1]);
     return HD_ERR_MISSING;
 }

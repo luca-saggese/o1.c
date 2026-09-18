@@ -157,6 +157,31 @@ void hd_sched_z_next(const float *noise_dev, const float *denoised_dev,
 void hd_sched_vcond(const void *z_dev, const void *xp_dev, float sigma,
                     float *mo_dev, int n);
 
+/* ------------------------------------------------------------------ */
+/* CFG guidance combine (base "default" path)                          */
+/* ------------------------------------------------------------------ */
+/* model_output = -v_guided = (1-g)*mo_uncond + g*mo_cond  (fp32). */
+void hd_sched_cfg_guided(const float *mo_cond, const float *mo_uncond, float g,
+                         float *mo_guided, int n);
+
+/* ------------------------------------------------------------------ */
+/* FlowUniPC multistep kernels (base "default" path)                   */
+/* ------------------------------------------------------------------ */
+/* conv[j] = sample[j] - sigma_cur * model_output[j]  (fp32 x0 pred). */
+void hd_unipc_convert(const float *sample_dev, const float *mo_dev,
+                      float sigma_cur, float *conv_dev, int n);
+/* UniC corrector step (order_c = 1 or 2); out = corrected sample. */
+void hd_unipc_correct(const float *last_dev, const float *mo0_dev,
+                      const float *mo_old_dev, const float *conv_dev,
+                      float sig_t, float sig_s0, float alpha_t, float h_phi_1,
+                      float B_h, float rhos_c0, float rhos_c1, float inv_rks0,
+                      int order_c, float *out_dev, int n);
+/* UniP predictor step (order_p = 1 or 2); out = prev_sample. */
+void hd_unipc_predict(const float *sample_dev, const float *mo0_dev,
+                      const float *mo_old_dev, float sig_t, float sig_s0,
+                      float alpha_t, float h_phi_1, float B_h, float rhos_p,
+                      float inv_rks0, int order_p, float *out_dev, int n);
+
 #ifdef __cplusplus
 }
 #endif

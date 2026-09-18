@@ -133,17 +133,47 @@ typedef struct {
  * (python/models/fm_solvers_unipc.py, solver_order=2, predict_x0=True,
  * solver_type="bh2", lower_order_final=True). Implements the convert ->
  * (optional) UniC corrector -> history shift -> UniP predictor chain in fp32
- * matching the oracle's torch operation order.
- *
- *   model_output  [n] fp32  -v_guided at the current step
- *   sample        [n] fp32  current sample (z_prev, fp32)
- *   prev_sample   [n] fp32  output sample
- *   scratch       [6*n] fp32 temporaries
- *
- * Uses s->sigmas as the schedule and advances u->step_index by one.
+ * matching the oracle's torch operation order. The scalar coefficient
+ * derivation runs on the host (hd_scheduler_unipc_plan); the pointwise
+ * math is executed by the CUDA kernels (hd_unipc_*).
  */
+
+/*
+ * Per-step UniPC coefficient plan derived on the host from the sigma schedule
+ * exactly like the oracle (flow prediction, predict_x0, solver bh2).
+ * Computed for the current step index si; the caller supplies the scheduler's
+ * persistent `this_order` (last step's predictor order) used by the corrector.
+ */
+typedef struct {
+    int corr_order;   /* effective order for the corrector (this_order from last step; 0 -> none) */
+    int pred_order;   /* effective order for the predictor  (1 during warmup, 2 after) */
+    int next_this_order;  /* this_order to persist for the next step's corrector */
+    int next_lower_order; /* lower_order_nums to persist (incremented up to solver_order) */
+
+    /* corrector coefficients */
+    double c_sig_t, c_sig_s0, c_alpha_t;   /* sigma_t=sigmas[si], sigma_s0=sigmas[si-1] */
+    double c_h_phi_1, c_B_h;
+    double c_rhos0, c_rhos1, c_inv_rks0;   /* rhos_c and 1/rks[0] (order 2) */
+
+    /* predictor coefficients */
+    double p_sig_t, p_sig_s0, p_alpha_t;   /* sigma_t=sigmas[si+1], sigma_s0=sigmas[si] */
+    double p_h_phi_1, p_B_h;
+    double p_rhos_p, p_inv_rks0;           /* rhos_p (0.5 for order 2) and 1/rks[0] */
+} hd_unipc_plan;
+
+/*
+ * Compute the UniPC per-step coefficient plan for step index `si`.
+ *   this_order   scheduler->this_order as persisted by the last step
+ *                (used by the corrector; 0 on the first step -> no corrector)
+ * Fills `plan` including the predictor order and the order/counter to persist.
+ */
+void hd_scheduler_unipc_plan(const hd_scheduler *s, int si, int this_order,
+                             int lower_order_nums, hd_unipc_plan *plan);
+
+/* Legacy unified CPU step (predictor+corrector) — still used by scheduler_matrix.c. */
 hd_status hd_scheduler_unipc_step(const hd_scheduler *s, hd_scheduler_unipc *u,
-                                  const float *model_output, const float *sample,
-                                  float *prev_sample, int n, float *scratch);
+                                  const float *mo, const float *sample,
+                                  float *prev, int n,
+                                  float *scratch);
 
 #endif /* HD_SCHEDULER_H */

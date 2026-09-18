@@ -137,6 +137,55 @@ static void gen_initial_noise(uint64_t seed, int width, int height,
     hd_torch_randn_f32(&rng, out, (int64_t)3 * height * width);
 }
 
+/* Deterministic FNV-1a 64-bit hash of the INITIAL BF16 latent for a seed.
+ * Reproduces randn(seed+1) -> pixel_unshuffle -> *S_NOISE -> f32->bf16 (via the
+ * fixed distinct-buffer path) then hashes the raw BF16 latent bytes from device.
+ * Regression: same seed must hash equal, different seeds must differ. */
+static uint64_t hash_initial_latent(uint64_t seed, int W, int Hh,
+                                    int grid_w, size_t nimg) {
+    float *noise_h = malloc((size_t)3 * Hh * W * sizeof(float));
+    float *z_h = malloc(nimg * sizeof(float));
+    if (!noise_h || !z_h) { free(noise_h); free(z_h); return 0; }
+    gen_initial_noise(seed, W, Hh, noise_h);
+    int ntok = (int)(nimg / (size_t)FF);
+    for (int tok = 0; tok < ntok; tok++) {
+        int r = tok / grid_w, c = tok % grid_w;
+        for (int ch = 0; ch < 3; ch++) {
+            for (int p1 = 0; p1 < PATCH; p1++) {
+                for (int p2 = 0; p2 < PATCH; p2++) {
+                    float v = noise_h[((size_t)ch * Hh + (size_t)(r * PATCH + p1)) * W +
+                                      (size_t)(c * PATCH + p2)];
+                    z_h[(size_t)tok * FF + (size_t)ch * PATCH * PATCH +
+                        (size_t)p1 * PATCH + p2] = v;
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < nimg; i++) z_h[i] *= S_NOISE;
+
+    float *zf32 = dev_alloc(nimg * 4);
+    void *zbf16 = dev_alloc(nimg * 2);
+    unsigned char *hbf = malloc(nimg * 2);
+    if (!zf32 || !zbf16 || !hbf) {
+        free(noise_h); free(z_h); free(hbf);
+        dev_free(zf32); dev_free(zbf16);
+        return 0;
+    }
+    cudaMemcpy(zf32, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
+    hd_f32_convert_bf16(zf32, zbf16, (int)nimg);
+    cudaMemcpy(hbf, zbf16, nimg * 2, cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    for (size_t i = 0; i < nimg * 2; i++) {
+        h ^= hbf[i];
+        h *= 1099511628211ULL; /* FNV-1a prime */
+    }
+    free(noise_h); free(z_h); free(hbf);
+    dev_free(zf32); dev_free(zbf16);
+    return h;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -224,14 +273,15 @@ int main(int argc, char **argv) {
     /* ---- device buffers ---- */
     void *z_prev_dev = dev_alloc(nimg * 2);
     void *z_next_dev = dev_alloc(nimg * 2);
+    float *z_f32_dev = dev_alloc(nimg * 4);
     float *mo_dev = dev_alloc(nimg * 4);
     float *noise_dev = dev_alloc(nimg * 4);
     float *scratch = dev_alloc(3 * nimg * 4);
     float *tsd = dev_alloc(4);
     void *out_dev = dev_alloc((size_t)S * FF * 2);
     void *xp_dev = dev_alloc(nimg * 2);
-    if (!z_prev_dev || !z_next_dev || !mo_dev || !noise_dev || !scratch ||
-        !tsd || !out_dev || !xp_dev) {
+    if (!z_prev_dev || !z_next_dev || !z_f32_dev || !mo_dev || !noise_dev ||
+        !scratch || !tsd || !out_dev || !xp_dev) {
         printf("FAIL: device alloc oom\n");
         return 1;
     }
@@ -259,8 +309,8 @@ int main(int argc, char **argv) {
     }
     /* scale by noise_scale_start=8.0 (oracle: noise_scale_start * randn) */
     for (size_t i = 0; i < nimg; i++) z_h[i] *= S_NOISE;
-    cudaMemcpy(z_prev_dev, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
-    hd_f32_convert_bf16(z_prev_dev, z_prev_dev, (int)nimg); /* in-place bf16 */
+    cudaMemcpy(z_f32_dev, z_h, nimg * sizeof(float), cudaMemcpyHostToDevice);
+    hd_f32_convert_bf16(z_f32_dev, z_prev_dev, (int)nimg); /* z_f32_dev is a distinct buffer */
     free(noise_h); free(z_h);
 
     /* ---- scheduler: derive Dev sigmas from DEFAULT_TIMESTEPS ---- */
@@ -350,12 +400,23 @@ int main(int argc, char **argv) {
     free(z_final); free(rgb); free(noise_step);
     dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
+    dev_free(z_f32_dev);
     dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
     dev_free(out_dev); dev_free(xp_dev);
     hd_forward_binding_free(&bw);
     hd_weight_store_free(&store);
     free(blob);
 
-    printf("\n%d assertions passed, %d failed\n", failures == 0 ? 5 : 5 - failures, failures);
+    /* ---- regression: initial BF16 latent determinism across seeds ---- */
+    uint64_t hA = hash_initial_latent(1, W, Hh, grid_h, grid_w, nimg);
+    uint64_t hB = hash_initial_latent(2, W, Hh, grid_h, grid_w, nimg);
+    uint64_t hC = hash_initial_latent(1, W, Hh, grid_h, grid_w, nimg);
+    printf("  initial-latent hash  seed1=%016llx seed2=%016llx seed1-re=%016llx\n",
+           (unsigned long long)hA, (unsigned long long)hB, (unsigned long long)hC);
+    CHECK(hA != 0 && hB != 0 && hC != 0, "initial latent hash computed");
+    CHECK(hA == hC, "same seed reproducible (A == C)");
+    CHECK(hA != hB, "different seeds differ (A != B)");
+
+    printf("\n%d assertions passed, %d failed\n", failures == 0 ? 8 : 8 - failures, failures);
     return failures ? 1 : 0;
 }

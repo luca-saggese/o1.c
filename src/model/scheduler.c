@@ -213,63 +213,162 @@ float hd_scheduler_noise_scale(const hd_scheduler *s, int step_index,
 
 /* lambda(sigma) = log(1 - sigma) - log(sigma), fp64 (oracle torch.log). */
 static double hd_unipc_lambda(double sigma) {
-    return log(1.0 - sigma) - log(sigma);
+   return log(1.0 - sigma) - log(sigma);
 }
 
 /*
- * UniP predictor (fm_solvers_unipc.py multistep_uni_p_bh_update, predict_x0,
- * bh2). sigma_t=sigmas[step+1], sigma_s0=sigmas[step]. Applies the converted
- * model_output history (ring) stored in u->model_outputs; the raw (unconverted)
- * model_output is ignored because predict_x0 uses only converted outputs.
- * On entry sample is the post-corrector sample and m0 = model_outputs[ORDER-1].
- * Writes prev_sample.
+ * Plan the host-side scalar coefficients for one UniPC step. The gamma terms
+ * (expm1, log) use fp64 like torch's scalar promotion; the per-element
+ * arithmetic is executed by the CUDA kernels (hd_unipc_*). Mirror of
+ * fm_solvers_unipc.py step()/multistep_* with solver_order=2, predict_x0,
+ * bh2, lower_order_final=True, disable_corrector=[].
+ *
+ *   si             current step index
+ *   this_order     predictor order persisted from the last step (used by the
+ *                  current step's corrector); 0 -> no corrector
+ *   lower_order_nums  warmup counter persisted from the last step
  */
-static void hd_unipc_predict(const hd_scheduler *s, hd_scheduler_unipc *u,
-                             const float *sample, int n, int order,
-                             float *prev_sample, float *tmp) {
+void hd_scheduler_unipc_plan(const hd_scheduler *s, int si, int this_order,
+                             int lower_order_nums, hd_unipc_plan *plan) {
+    if (!s || !plan) return;
+    memset(plan, 0, sizeof(*plan));
+
+    int n_inf = s->num_steps - 1; /* number of inference steps */
+    if (si < 0 || si >= n_inf) return;
+
+    /* ---- corrector: use_corrector = step_index>0 && last_sample not None
+       (disable_corrector empty). The corrector order is the last step's
+       predictor order (self.this_order), clamped to solver_order=2. ----
+       Warmup: legacy step computed this_order = min(2, len-si) then took
+       min with lower_order_nums+1; that *predictor* order became the next
+       step's *corrector* order. Here the caller passes exactly that
+       persisted value (defaults 0 -> no corrector on step 0). */
+    if (si > 0 && this_order > 0) {
+        int co = (this_order >= 2) ? 2 : 1;
+        double sig_c_t = (double)s->sigmas[si];       /* sigmas[step_index]   */
+        double sig_c_s0 = (double)s->sigmas[si - 1];  /* sigmas[step_index-1] */
+        double alpha_c_t = 1.0 - sig_c_t;
+        double l_t = hd_unipc_lambda(sig_c_t);
+        double l_s0 = hd_unipc_lambda(sig_c_s0);
+        double hc = l_t - l_s0;
+        double hh = -hc;                 /* predict_x0 */
+        double h_phi_1 = expm1(hh);
+        double B_h = expm1(hh);          /* bh2 */
+
+        double rk0 = 1.0, rhos_c0 = 0.0, rhos_c1 = 0.5;
+        if (co == 2) {
+            double sig_m = (si - 2 >= 0) ? (double)s->sigmas[si - 2]
+                                         : (double)s->sigmas[0];
+            double l_m = hd_unipc_lambda(sig_m);
+            rk0 = (l_m - l_s0) / hc;
+            /* rhos_c via 2x2 solve (mirrors legacy hd_unipc_correct). */
+            double h_phi_k = h_phi_1 / hh - 1.0;
+            double b0 = h_phi_k * 1.0 / B_h;
+            h_phi_k = h_phi_k / hh - 1.0 / 2.0;
+            double b1 = h_phi_k * 2.0 / B_h;
+            double x0, x1;
+            if (hd_solve2x2(1.0, 1.0, rk0, 1.0, b0, b1, &x0, &x1) != 0.0) {
+                rhos_c0 = x0; rhos_c1 = x1;
+            } else {
+                rhos_c0 = 0.0; rhos_c1 = 0.5;
+            }
+        }
+        plan->corr_order = co;
+        plan->c_sig_t = sig_c_t; plan->c_sig_s0 = sig_c_s0;
+        plan->c_alpha_t = alpha_c_t;
+        plan->c_h_phi_1 = h_phi_1; plan->c_B_h = B_h;
+        plan->c_rhos0 = rhos_c0; plan->c_rhos1 = rhos_c1;
+        plan->c_inv_rks0 = (rk0 == 0.0) ? 0.0 : 1.0 / rk0;
+    }
+
+    /* ---- predictor ----
+       lower_order_final: this_order = min(solver_order, n_inf - si); then
+       min(this_order, lower_order_nums + 1)  (warmup). */
+    int to = 2;
+    if (n_inf - si < to) to = n_inf - si;
+    int pred_order = to;
+    if (pred_order > lower_order_nums + 1) pred_order = lower_order_nums + 1;
+    if (pred_order < 1) pred_order = 1;
+
+    double sig_p_t = (double)s->sigmas[si + 1];   /* sigmas[step_index+1] */
+    double sig_p_s0 = (double)s->sigmas[si];      /* sigmas[step_index]   */
+    double alpha_p_t = 1.0 - sig_p_t;
+    double l_pt = hd_unipc_lambda(sig_p_t);
+    double l_ps0 = hd_unipc_lambda(sig_p_s0);
+    double hp = l_pt - l_ps0;
+    double hh = -hp;                 /* predict_x0 */
+    double h_phi_1 = expm1(hh);
+    double B_h = expm1(hh);          /* bh2 */
+
+    double rk0 = 1.0, rhos_p = 0.0;
+    if (pred_order == 2) {
+        int ssi = si - 1;
+        double sig_m = (ssi >= 0) ? (double)s->sigmas[ssi] : (double)s->sigmas[0];
+        double l_m = hd_unipc_lambda(sig_m);
+        rk0 = (l_m - l_ps0) / hp;
+        if (rk0 != 0.0) rhos_p = 0.5;  /* order-2 simplified rhos_p=[0.5] */
+    }
+    plan->pred_order = pred_order;
+    plan->p_sig_t = sig_p_t; plan->p_sig_s0 = sig_p_s0;
+    plan->p_alpha_t = alpha_p_t;
+    plan->p_h_phi_1 = h_phi_1; plan->p_B_h = B_h;
+    plan->p_rhos_p = rhos_p; plan->p_inv_rks0 = (rk0 == 0.0) ? 0.0 : 1.0 / rk0;
+
+    /* ---- persist ----
+       The next step's corrector uses this predictor's order; the warmup
+       counter increments once up to solver_order. */
+    plan->next_this_order = pred_order;
+    int lower_next = lower_order_nums;
+    if (lower_next < 2) lower_next++;
+    plan->next_lower_order = lower_next;
+}
+
+/* ------------------------------------------------------------------ */
+/* CPU-only reference FlowUniPC step (UnitPC fixture/scheduler_matrix) */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Reference UniPC scalar math on plain host float arrays, kept for the
+ * CPU-only scheduler_matrix fixture. The static helpers are suffixed `_cpu`
+ * to avoid collision with the CUDA device wrappers (hd_unipc_predict/correct)
+ * used by generate.c.
+ */
+
+static double hd_unipc_lambda_cpu(double sigma) {
+    return log(1.0 - sigma) - log(sigma);
+}
+
+static void hd_unipc_predict_cpu(const hd_scheduler *s, hd_scheduler_unipc *u,
+                                 const float *sample, int n, int order,
+                                 float *prev_sample, float *tmp) {
     int si = u->step_index;
     double sigma_t = (double)s->sigmas[si + 1];
     double sigma_s0 = (double)s->sigmas[si];
     double alpha_t = 1.0 - sigma_t;
-    double alpha_s0 = 1.0 - sigma_s0;
-
-    double lambda_t = hd_unipc_lambda(sigma_t);
-    double lambda_s0 = hd_unipc_lambda(sigma_s0);
+    double lambda_t = hd_unipc_lambda_cpu(sigma_t);
+    double lambda_s0 = hd_unipc_lambda_cpu(sigma_s0);
     double h = lambda_t - lambda_s0;
-
-    double hh = -h; /* predict_x0 */
+    double hh = -h;
     double h_phi_1 = expm1(hh);
-    double h_phi_k = h_phi_1 / hh - 1.0;
-    double B_h = expm1(hh); /* bh2 */
-
+    double B_h = expm1(hh);
     const float *m0 = u->model_outputs[HD_UNIPC_ORDER - 1];
-    (void)alpha_s0;
 
-    /* rks / D1s for i in 1..order-1 */
     double rks[HD_UNIPC_ORDER];
-    double rk0 = 1.0;
     int k = 0;
+    rks[k++] = 1.0;
     for (int i = 1; i < order; i++) {
         int ssi = si - i;
         double sigma_si = (double)s->sigmas[ssi];
-        double lambda_si = hd_unipc_lambda(sigma_si);
+        double lambda_si = hd_unipc_lambda_cpu(sigma_si);
         double rk = (lambda_si - lambda_s0) / h;
         rks[k++] = rk;
     }
-    rks[k++] = 1.0;
-
-    /* rhos_p: for order 2 -> [0.5]; otherwise solve R[:-1,:-1] b[:-1].
-       Only order 1 and 2 occur (solver_order=2). */
-    double rhos_p = 0.5; /* only used when order==2 and k>=1 */
-
-    /* x_t_ = sigma_t/sigma_s0 * x - alpha_t * h_phi_1 * m0 */
+    double rhos_p = 0.5;
     double scale = sigma_t / sigma_s0;
     double coef = alpha_t * h_phi_1;
-    for (int j = 0; j < n; j++) {
+    for (int j = 0; j < n; j++)
         prev_sample[j] = (float)(scale * (double)sample[j] - coef * (double)m0[j]);
-    }
     if (order == 2) {
-        /* pred_res = rhos_p * D1s[0]; D1s[0] = (m_{step-1} - m0)/rks[0] */
         const float *m1 = u->model_outputs[HD_UNIPC_ORDER - 2];
         double inv_rk = 1.0 / rks[0];
         double Bc = alpha_t * B_h * rhos_p;
@@ -281,101 +380,68 @@ static void hd_unipc_predict(const hd_scheduler *s, hd_scheduler_unipc *u,
     (void)tmp;
 }
 
-/*
- * UniC corrector (fm_solvers_unipc.py multistep_uni_c_bh_update, predict_x0,
- * bh2). sigma_t=sigmas[step], sigma_s0=sigmas[step-1]. this_model_output is
- * the converted output; last_sample is pre-predictor; this_sample is
- * post-predictor. Writes corrected sample into sample (in place).
- */
-static void hd_unipc_correct(const hd_scheduler *s, hd_scheduler_unipc *u,
-                             const float *this_model_output,
-                             const float *last_sample, float *this_sample,
-                             int n, int order, float *tmp) {
+static void hd_unipc_correct_cpu(const hd_scheduler *s, hd_scheduler_unipc *u,
+                                 const float *this_model_output,
+                                 const float *last_sample, float *this_sample,
+                                 int n, int order, float *tmp) {
     int si = u->step_index;
     double sigma_t = (double)s->sigmas[si];
     double sigma_s0 = (double)s->sigmas[si - 1];
     double alpha_t = 1.0 - sigma_t;
-    double alpha_s0 = 1.0 - sigma_s0;
-
-    double lambda_t = hd_unipc_lambda(sigma_t);
-    double lambda_s0 = hd_unipc_lambda(sigma_s0);
+    double lambda_t = hd_unipc_lambda_cpu(sigma_t);
+    double lambda_s0 = hd_unipc_lambda_cpu(sigma_s0);
     double h = lambda_t - lambda_s0;
-
     double hh = -h;
     double h_phi_1 = expm1(hh);
-    double h_phi_k = h_phi_1 / hh - 1.0;
     double B_h = expm1(hh);
-
     const float *m0 = u->model_outputs[HD_UNIPC_ORDER - 1];
-    (void)alpha_s0;
 
-    /* D1s for i in 1..order-1 using si - (i+1) */
     double rks[HD_UNIPC_ORDER];
     int k = 0;
+    rks[k++] = 1.0;
     for (int i = 1; i < order; i++) {
         int ssi = si - (i + 1);
         double sigma_si = (double)s->sigmas[ssi];
-        double lambda_si = hd_unipc_lambda(sigma_si);
+        double lambda_si = hd_unipc_lambda_cpu(sigma_si);
         double rk = (lambda_si - lambda_s0) / h;
         rks[k++] = rk;
     }
-    rks[k++] = 1.0;
 
-    /* rhos_c: order 1 -> [0.5]; order 2 -> solve 2x2 (R, b) */
-    double rhos_c[2] = {0.5, 0.0};
-    int rhos_n = 1;
+    double rhos_c0 = 0.0, rhos_c1 = 0.5;
     if (order == 2) {
-        double factorial_i = 1.0;
-        double b0, b1;
-        /* R = [rks^(i-1) for i in 1..order+1], rks=[rk0,1.0] for order 2:
-             i=1 -> [1,1]; i=2 -> [rk0, 1.0].
-           b = [h_phi_k*factorial_i/B_h] iterated. */
-        double R00 = 1.0, R01 = 1.0;               /* i=1: rks^0 */
-        double R10 = rks[0], R11 = rks[1];         /* i=2: rks^1 (rks[1]==1.0) */
-        (void)factorial_i;
-        /* h_phi_k iterated: i=1 h_phi_k0=h_phi_1/hh-1, then update */
-        double hpk = h_phi_1 / hh - 1.0;          /* i=1 */
-        b0 = hpk * 1.0 / B_h;                      /* factorial_i=1 */
-        hpk = hpk / hh - 1.0 / 2.0;                /* i=2, factorial=2! */
-        b1 = hpk * 2.0 / B_h;                      /* factorial_i=2 */
+        double h_phi_k = h_phi_1 / hh - 1.0;
+        double b0 = h_phi_k * 1.0 / B_h;
+        h_phi_k = h_phi_k / hh - 1.0 / 2.0;
+        double b1 = h_phi_k * 2.0 / B_h;
         double x0, x1;
-        if (hd_solve2x2(R00, R01, R10, R11, b0, b1, &x0, &x1) != 0.0) {
-            rhos_c[0] = x0;
-            rhos_c[1] = x1;
-            rhos_n = 2;
-        } else {
-            rhos_n = 1;
+        if (hd_solve2x2(1.0, 1.0, rks[0], 1.0, b0, b1, &x0, &x1) != 0.0) {
+            rhos_c0 = x0; rhos_c1 = x1;
         }
     }
 
-    /* x_t_ = sigma_t/sigma_s0*last_sample - alpha_t*h_phi_1*m0 */
     double scale = sigma_t / sigma_s0;
     double coef = alpha_t * h_phi_1;
-    for (int j = 0; j < n; j++) {
-        this_sample[j] =
-            (float)(scale * (double)last_sample[j] - coef * (double)m0[j]);
-    }
+    for (int j = 0; j < n; j++)
+        this_sample[j] = (float)(scale * (double)last_sample[j] - coef * (double)m0[j]);
 
-    /* D1_t = this_model_output - m0 */
-    if (rhos_n == 2) {
-        /* corr_res = rhos_c[0]*D1s[0]; D1s[0] = (m_{si-2} - m0)/rks[0] */
+    if (order == 2) {
         const float *m2 = u->model_outputs[HD_UNIPC_ORDER - 2];
         double inv_rk = 1.0 / rks[0];
         double Bc = alpha_t * B_h;
         for (int j = 0; j < n; j++) {
             double D1 = ((double)m2[j] - (double)m0[j]) * inv_rk;
             double D1_t = (double)this_model_output[j] - (double)m0[j];
-            double corr = rhos_c[0] * D1 + rhos_c[1] * D1_t;
+            double corr = rhos_c0 * D1 + rhos_c1 * D1_t;
             this_sample[j] = (float)((double)this_sample[j] - Bc * corr);
         }
     } else {
-        /* order 1: rhos_c = [0.5], no D1s -> corr_res=0, D1_t term only */
         double Bc = alpha_t * B_h * 0.5;
         for (int j = 0; j < n; j++) {
             double D1_t = (double)this_model_output[j] - (double)m0[j];
             this_sample[j] = (float)((double)this_sample[j] - Bc * D1_t);
         }
     }
+    (void)tmp;
 }
 
 hd_status hd_scheduler_unipc_step(const hd_scheduler *s, hd_scheduler_unipc *u,
@@ -396,68 +462,49 @@ hd_status hd_scheduler_unipc_step(const hd_scheduler *s, hd_scheduler_unipc *u,
     }
 
     int si = u->step_index;
-
-    /* convert_model_output: x0_pred = sample - sigma_t * model_output.
-       Store into the (temporary) current slot used as m0 source. We write the
-       converted output into model_outputs[ORDER-1]'s buffer AFTER computing the
-       current conversion so the corrector sees the *previous* history. */
     float sigma_cur = s->sigmas[si];
-    float *conv = scratch; /* current converted model output (n) */
-    for (int j = 0; j < n; j++) {
+    float *conv = scratch; /* current converted model output */
+    for (int j = 0; j < n; j++)
         conv[j] = sample[j] - sigma_cur * model_output[j];
-    }
 
-    /* use_corrector = step_index>0 && last_sample is not None */
     int use_corrector =
         (si > 0) && u->has_last_sample && (u->this_order > 0);
 
-    /* Working sample copy (post-corrector = this_sample). We compute into
-       prev_sample's buffer for the corrector input, then predictor output. */
-    float *this_sample = prev_sample; /* scratch reuse: post-corr sample */
+    float *this_sample = prev_sample;
     for (int j = 0; j < n; j++) this_sample[j] = sample[j];
 
     if (use_corrector) {
-        int order = u->this_order;
-        hd_unipc_correct(s, u, conv, u->last_sample, this_sample, n, order,
-                         scratch);
+        hd_unipc_correct_cpu(s, u, conv, u->last_sample, this_sample, n,
+                             u->this_order, scratch);
     }
 
-    /* history shift: move converted output into the ring (newest at end) */
+    /* history shift (ring, newest at end) */
     float *sink = u->model_outputs[HD_UNIPC_ORDER - 1];
     for (int i = 0; i < HD_UNIPC_ORDER - 1; i++) {
-        /* shift ring: model_outputs[i] = model_outputs[i+1] by copying
-           contents (buffers are persistent pointers). */
         float *dst = u->model_outputs[i];
         float *src = u->model_outputs[i + 1];
         for (int j = 0; j < n; j++) dst[j] = src[j];
     }
     for (int j = 0; j < n; j++) sink[j] = conv[j];
 
-    /* this_order: min(solver_order, len(timesteps)-step_index) then warmup */
     int to = HD_UNIPC_ORDER;
-    int len = s->num_steps - 1; /* number of inference steps */
+    int len = s->num_steps - 1;
     if (len - si < to) to = len - si;
     int this_order = to;
     if (this_order > u->lower_order_nums + 1)
         this_order = u->lower_order_nums + 1;
     u->this_order = this_order;
 
-    /* last_sample = this_sample (post-corrector) before predictor */
     if (u->has_last_sample) {
-        float *ls = u->last_sample;
-        for (int j = 0; j < n; j++) ls[j] = this_sample[j];
+        for (int j = 0; j < n; j++) u->last_sample[j] = this_sample[j];
     } else {
         for (int j = 0; j < n; j++) u->last_sample[j] = this_sample[j];
         u->has_last_sample = 1;
     }
 
-    /* predictor: needs m0 = model_outputs[-1] (now the new converted) and
-       m_{step-1} = model_outputs[-2]. But the predictor must use m0 = the
-       converted output *of the current step* which we just stored as sink. */
-    hd_unipc_predict(s, u, this_sample, n, this_order, prev_sample, scratch);
+    hd_unipc_predict_cpu(s, u, this_sample, n, this_order, prev_sample, scratch);
 
     if (u->lower_order_nums < HD_UNIPC_ORDER) u->lower_order_nums++;
-
     u->step_index++;
     return HD_OK;
 }

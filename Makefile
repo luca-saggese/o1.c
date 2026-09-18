@@ -393,3 +393,12 @@ clean:
 	find src tests -name '*.o' -delete
 
 .PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity clean
+# Base FlowUniPC CUDA kernel validation (M-post base default path).
+TEST_BUNIPC_BIN := build/test_base_unipc_cuda
+TEST_BUNIPC_SRCS := tests/unit/test_base_unipc_cuda.c src/model/scheduler.c $(CORE_SRCS)
+TEST_BUNIPC_OBJS := $(TEST_BUNIPC_SRCS:.c=.o)
+test-base-unipc: $(TEST_BUNIPC_BIN)
+	./$(TEST_BUNIPC_BIN)
+$(TEST_BUNIPC_BIN): $(TEST_BUNIPC_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_BUNIPC_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
