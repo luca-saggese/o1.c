@@ -1,0 +1,39 @@
+# Example musubi-tuner training config for a HiDream-O1 Dev T2I LoRA.
+#
+# Usage:
+#   1. prepare a dataset:
+#        python3 tools/lora/prepare_dataset.py \
+#            --input my_images/ --output datasets/my_lora \
+#            --width 1024 --height 1024
+#   2. train (wraps the pinned musubi-tuner):
+#        python3 tools/lora/train.py \
+#            --dataset-config datasets/my_lora/dataset.toml \
+#            --pretrained-model HiDream-ai/HiDream-O1-Image-Dev-2604 \
+#            --output-dir out --output-name my_lora \
+#            --network-dim 16 --network-alpha 16 \
+#            --learning-rate 1e-4 --max-train-epochs 10
+#   3. inspect / merge:
+#        python3 tools/lora/inspect_lora.py out/my_lora.safetensors
+#        python3 tools/lora/merge_gguf.py \
+#            --base artifacts/models/hidream-o1-dev-bf16.gguf \
+#            --lora out/my_lora.safetensors:1.0 \
+#            --output artifacts/models/hidream-o1-dev-my_lora-bf16.gguf \
+#            --map config/hidream_lora_map_dev.json
+#   4. run natively:
+#        ./build/hidream --prompt "..." --model-dir <base.gguf> \
+#            --lora out/my_lora.safetensors:1.0 --output out.png
+
+# T2I linear LoRA, Full rank, BF16 (o1.c phase-1 contract).
+task: t2i
+network_module: networks.lora
+network_dim: 16
+network_alpha: 16
+learning_rate: 1.0e-4
+max_train_epochs: 10
+save_every_n_epochs: 1
+mixed_precision: bf16
+save_model_as: safetensors
+save_precision: bf16
+resolution: "1024,1024"
+train_batch_size: 1
+seed: 42

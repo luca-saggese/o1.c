@@ -1,0 +1,4 @@
+safetensors>=0.5
+numpy>=2.0
+Pillow>=10
+torch>=2.1

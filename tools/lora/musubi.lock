@@ -1,0 +1,3 @@
+repository=https://github.com/kohya-ss/musubi-tuner.git
+commit=4e7c7149249e7715e9168920feb4c420423abba7
+note=musubi-tuner v0.3.5 (bump-version-0.3.5); first release with HiDream-O1 LoRA support verified for o1.c
