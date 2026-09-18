@@ -168,6 +168,7 @@ void hd_vision_layout(int64_t n, int64_t m, hd_vision_offsets *o) {
     o->qkv       = b; b += n * 3456 * bf16;
     o->scores    = b; b += n * n * Hd * bf16;
     o->probs     = b; b += n * n * Hd * bf16;
+    o->mask      = b; b += n * n * bf16;
     o->attn_out  = b; b += n * H * bf16;
     o->fc1       = b; b += n * I * bf16;
     o->cosf      = b; b += n * H * 4;
@@ -187,13 +188,6 @@ int64_t hd_vision_workspace_bytes(int64_t n) {
     if (m < 1) m = 1;
     hd_vision_offsets o;
     hd_vision_layout(n, m, &o);
-    fprintf(stderr,
-            "VISION_LAYOUT_BUILD %s %s n=%lld rot=%lld ds_fc2=%lld total=%lld\n",
-            __DATE__, __TIME__,
-            (long long)n,
-            (long long)o.rot,
-            (long long)o.ds_fc2,
-            (long long)o.total_bytes);
     return o.total_bytes;
 }
 
@@ -333,6 +327,7 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
     void *qkv       = base + o.qkv;
     void *scores    = base + o.scores;
     void *probs     = base + o.probs;
+    void *mask      = base + o.mask;
     void *attn_out  = base + o.attn_out;
     void *fc1       = base + o.fc1;
     float *cosf     = (float *)(base + o.cosf);
@@ -403,6 +398,10 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
     {
         const void *cur_in = h_a;
         void *cur_out = h_b;
+        /* Zero additive attention mask [n,n] bf16 (vision attention is
+         * non-causal / full attention; the eager backend requires a mask
+         * pointer and adds it to the scores). */
+        cudaMemset(mask, 0, (size_t)n * n * 2);
         for (int i = 0; i < HD_VISION_DEPTH; i++) {
             const hd_vision_block_binding *blk = &bw->blocks[i];
             /* norm1 */
@@ -412,8 +411,8 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
             /* split q/k/v -> [Hd, n, D] */
             hd_vision_qkv_split(qkv, q, k, v, n, Hd, D);
             /* rotary on q/k (cos/sin [n, 72]) */
-            hd_apply_rotary(q, cosf, sinf, qr, Hd, n, D);
-            hd_apply_rotary(k, cosf, sinf, kr, Hd, n, D);
+            hd_apply_rotary_f32(q, cosf, sinf, qr, Hd, n, D);
+            hd_apply_rotary_f32(k, cosf, sinf, kr, Hd, n, D);
             /* attention: cuDNN SDPA (no mask) or eager reference.
              * cuDNN writes head-major [Hd, n, D]; eager writes seq-major
              * [n, Hd*D]. Normalize to seq-major in attn_out. */
@@ -428,7 +427,7 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
                 }
             }
             if (!sdpa_ok) {
-                hd_attention_eager(qr, kr, v, NULL, scores, probs,
+                hd_attention_eager(qr, kr, v, mask, scores, probs,
                                    attn_out, Hd, Hd, n, D, scaling);
             }
             /* proj (cuBLAS) over [n, Hd*D] */
@@ -439,10 +438,19 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
             hd_vision_layernorm(attn_resid, blk->norm2_w, blk->norm2_b, ln2, n, H, eps);
             /* mlp: fc1 -> gelu -> fc2 */
             hd_linear(ln2, blk->fc1_w, blk->fc1_b, fc1, n, I, H, 1);
+            if (i == 0 && ws->block0_snaps && ws->block0_snaps[HD_B0_FC1])
+                cudaMemcpy(ws->block0_snaps[HD_B0_FC1], fc1, (size_t)n * I * 2,
+                           cudaMemcpyDeviceToDevice);
             hd_vision_gelu(fc1, fc1, (size_t)n * I);
             hd_linear(fc1, blk->fc2_w, blk->fc2_b, fc2, n, H, I, 1);
             /* residual: mlp_resid = attn_resid + fc2 */
             hd_residual_add(attn_resid, fc2, mlp_resid, (size_t)n * H);
+
+            /* Block-output debug snapshots (dedicated buffers, captured
+             * DURING the forward before the ping-pong copy). */
+            if (ws->block_out_snaps && ws->block_out_snaps[i])
+                cudaMemcpy(ws->block_out_snaps[i], mlp_resid,
+                           (size_t)n * H * 2, cudaMemcpyDeviceToDevice);
 
             /* Block-0 debug snapshots: capture at the exact execution point
              * into dedicated buffers (the workspace scratch is reused by
@@ -465,7 +473,6 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
                 if (s[HD_B0_PROJ]) cudaMemcpy(s[HD_B0_PROJ], attn_resid, nH, cudaMemcpyDeviceToDevice);
                 if (s[HD_B0_ATTN_RESID]) cudaMemcpy(s[HD_B0_ATTN_RESID], attn_resid, nH, cudaMemcpyDeviceToDevice);
                 if (s[HD_B0_NORM2]) cudaMemcpy(s[HD_B0_NORM2], ln2, nH, cudaMemcpyDeviceToDevice);
-                if (s[HD_B0_FC1]) cudaMemcpy(s[HD_B0_FC1], fc1, (size_t)n * I * 2, cudaMemcpyDeviceToDevice);
                 if (s[HD_B0_FC2]) cudaMemcpy(s[HD_B0_FC2], fc2, nH, cudaMemcpyDeviceToDevice);
                 if (s[HD_B0_OUTPUT]) cudaMemcpy(s[HD_B0_OUTPUT], mlp_resid, nH, cudaMemcpyDeviceToDevice);
             }
@@ -478,14 +485,29 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
                 else if (i == 24) ds_idx = 2;
                 if (ds_idx >= 0) {
                     const hd_vision_merger_binding *ds = &bw->deepstack[ds_idx];
-                    /* spatial merge -> [m, 4608] */
-                    hd_vision_spatial_merge(mlp_resid, ds_merged, grid_h, grid_w, H);
-                    /* norm over 4608 (post-shuffle) */
-                    hd_vision_layernorm(ds_merged, ds->norm_w, ds->norm_b, ds_fc1, m, 4608, eps);
-                    /* fc1 -> gelu -> fc2 */
-                    hd_linear(ds_fc1, ds->fc1_w, ds->fc1_b, ds_fc1, m, 4608, 4608, 1);
-                    hd_vision_gelu(ds_fc1, ds_fc1, (size_t)m * 4608);
-                    hd_linear(ds_fc1, ds->fc2_w, ds->fc2_b, ds_fc2, m, O, 4608, 1);
+                    /* NO spatial permutation: block output [n,1152] is
+                     * already block-major; reinterpret as [m,4608] and
+                     * norm over 4608 (use_postshuffle_norm=True). */
+                    hd_vision_layernorm(mlp_resid, ds->norm_w, ds->norm_b,
+                                        ds_fc1, m, 4608, eps);
+                    if (ws->ds_merger_snaps && ws->ds_merger_snaps[ds_idx][0])
+                        cudaMemcpy(ws->ds_merger_snaps[ds_idx][0], ds_fc1,
+                                   (size_t)m * 4608 * 2, cudaMemcpyDeviceToDevice);
+                    /* fc1 -> gelu -> fc2. fc1 must NOT be in-place (M>1
+                     * GEMM with y==x races across tile blocks); use the
+                     * dedicated ds_merged scratch. */
+                    hd_linear(ds_fc1, ds->fc1_w, ds->fc1_b, ds_merged, m, 4608, 4608, 1);
+                    if (ws->ds_merger_snaps && ws->ds_merger_snaps[ds_idx][1])
+                        cudaMemcpy(ws->ds_merger_snaps[ds_idx][1], ds_merged,
+                                   (size_t)m * 4608 * 2, cudaMemcpyDeviceToDevice);
+                    hd_vision_gelu_exact(ds_merged, ds_merged, (size_t)m * 4608);
+                    if (ws->ds_merger_snaps && ws->ds_merger_snaps[ds_idx][2])
+                        cudaMemcpy(ws->ds_merger_snaps[ds_idx][2], ds_merged,
+                                   (size_t)m * 4608 * 2, cudaMemcpyDeviceToDevice);
+                    hd_linear(ds_merged, ds->fc2_w, ds->fc2_b, ds_fc2, m, O, 4608, 1);
+                    if (ws->ds_merger_snaps && ws->ds_merger_snaps[ds_idx][3])
+                        cudaMemcpy(ws->ds_merger_snaps[ds_idx][3], ds_fc2,
+                                   (size_t)m * O * 2, cudaMemcpyDeviceToDevice);
                     cudaMemcpy(deepstack_out[ds_idx], ds_fc2,
                                (size_t)m * O * 2, cudaMemcpyDeviceToDevice);
                 }
@@ -511,12 +533,29 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
         /* norm over 1152 (use_postshuffle_norm=False): norm applies to the
          * [n, 1152] block output BEFORE the merge view. */
         hd_vision_layernorm(mlp_resid, mg->norm_w, mg->norm_b, merge_norm, n, H, eps);
-        /* spatial merge of the normed [n, 1152] -> [m, 4608] */
-        hd_vision_spatial_merge(merge_norm, merged, grid_h, grid_w, H);
+        if (ws->merger_snaps && ws->merger_snaps[0])
+            cudaMemcpy(ws->merger_snaps[0], merge_norm, (size_t)n * H * 2,
+                       cudaMemcpyDeviceToDevice);
+        /* NO spatial permutation: the vision tokens are already block-major
+         * (token order (bh,bw,mh,mw)), so the normed [n,1152] memory is
+         * logically [m,4608] by grouping 4 consecutive rows (upstream
+         * x.view(-1, 4608)). */
+        if (ws->merger_snaps && ws->merger_snaps[1])
+            cudaMemcpy(ws->merger_snaps[1], merge_norm, (size_t)m * 4608 * 2,
+                       cudaMemcpyDeviceToDevice);
         /* fc1 -> gelu -> fc2 */
-        hd_linear(merged, mg->fc1_w, mg->fc1_b, merge_fc1, m, 4608, 4608, 1);
-        hd_vision_gelu(merge_fc1, merge_fc1, (size_t)m * 4608);
+        hd_linear(merge_norm, mg->fc1_w, mg->fc1_b, merge_fc1, m, 4608, 4608, 1);
+        if (ws->merger_snaps && ws->merger_snaps[2])
+            cudaMemcpy(ws->merger_snaps[2], merge_fc1, (size_t)m * 4608 * 2,
+                       cudaMemcpyDeviceToDevice);
+        hd_vision_gelu_exact(merge_fc1, merge_fc1, (size_t)m * 4608);
+        if (ws->merger_snaps && ws->merger_snaps[3])
+            cudaMemcpy(ws->merger_snaps[3], merge_fc1, (size_t)m * 4608 * 2,
+                       cudaMemcpyDeviceToDevice);
         hd_linear(merge_fc1, mg->fc2_w, mg->fc2_b, merge_fc2, m, O, 4608, 1);
+        if (ws->merger_snaps && ws->merger_snaps[4])
+            cudaMemcpy(ws->merger_snaps[4], merge_fc2, (size_t)m * O * 2,
+                       cudaMemcpyDeviceToDevice);
         cudaMemcpy(image_embeds_out, merge_fc2, (size_t)m * O * 2,
                    cudaMemcpyDeviceToDevice);
     }

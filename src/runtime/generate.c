@@ -24,6 +24,9 @@
  */
 
 #include "generate.h"
+#include "vision.h"
+#include "vision_kernels.h"
+#include "hd_image.h"
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -36,6 +39,7 @@
 #include "forward.h"
 #include "hd_image.h"
 #include "layout.h"
+#include "ref_alias.h"
 #include "o1_timing.h"
 #include "scheduler.h"
 #include "sequence.h"
@@ -255,6 +259,17 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     size_t total_ref_tokens = 0;
     hd_status st = HD_OK;
 
+    /* VLM conditioning images (PATH B): one per reference, resized to the
+     * Qwen processor grid (patch 16, temporal 2, merge 2). Kept alive until
+     * the vision tower runs once after weight load. */
+    hd_image vlm_imgs[HD_SEQ_MAX_REFS];
+    int vlm_n[HD_SEQ_MAX_REFS];      /* raw vision patch count N = gh*gw */
+    int vlm_gh[HD_SEQ_MAX_REFS], vlm_gw[HD_SEQ_MAX_REFS];
+    for (int r = 0; r < K; r++) {
+        vlm_imgs[r].rgb = NULL;
+        vlm_n[r] = 0; vlm_gh[r] = 0; vlm_gw[r] = 0;
+    }
+
     for (int r = 0; r < K; r++) {
         hd_image img;
         st = hd_image_load(req->references[r].path, &img);
@@ -262,6 +277,19 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
             hd_set_error("generate: ref %d load: %s", r, hd_last_error());
             return st;
         }
+        /* Keep a deep copy of the original for the VLM conditioning
+         * resize (PATH B); PATH A frees `img` below. */
+        size_t npx = (size_t)img.width * img.height;
+        float *orig = malloc(npx * 3 * sizeof(float));
+        if (!orig) {
+            hd_image_free(&img);
+            hd_set_error("generate: ref %d orig copy oom", r);
+            return HD_ERR_OOM;
+        }
+        memcpy(orig, img.rgb, npx * 3 * sizeof(float));
+        vlm_imgs[r].width = img.width;
+        vlm_imgs[r].height = img.height;
+        vlm_imgs[r].rgb = orig;
         hd_image resized;
         st = hd_image_resize(&img, max_size, PATCH, &resized);
         hd_image_free(&img);
@@ -274,25 +302,49 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         float *patches = malloc(tokens * FF * sizeof(float));
         if (!patches) { hd_image_free(&resized); return HD_ERR_OOM; }
         st = hd_image_to_patches(&resized, PATCH, patches);
-        int ref_w = resized.width, ref_h = resized.height;
         hd_image_free(&resized);
         if (st != HD_OK) { free(patches); return st; }
         for (size_t i = 0; i < tokens * FF; i++) patches[i] = patches[i] * 2.0f - 1.0f;
 
-        /* cond grid (VLM): oracle calculate_dimensions(cond_img_size, ratio) */
-        int cond_w, cond_h;
-        hd_image_calc_dims(CONDITION_IMAGE_SIZE, (float)ref_w, (float)ref_h,
-                           PATCH, &cond_w, &cond_h);
-        cond_w = cond_w / PATCH;
-        cond_h = cond_h / PATCH;
+        /* VLM conditioning grid, computed ONCE from the ORIGINAL image
+         * (oracle pipeline.py): cond_img_size = 384 (K<=4), 288 (K<=8),
+         * 192 (else); calculate_dimensions(cond_img_size, ratio) snaps to
+         * 32-px multiples. cond_w/cond_h = post-merge token grid, so the
+         * VLM resize target is (cond_w*32, cond_h*32) px. Every consumer
+         * below (resize, patchify, placeholders, tower output) derives
+         * from these same two numbers. */
+        int cw, ch;
+        int cond_img_size = CONDITION_IMAGE_SIZE;
+        if (K > 4 && K <= 8) cond_img_size = CONDITION_IMAGE_SIZE * 48 / 64;
+        else if (K > 8) cond_img_size = CONDITION_IMAGE_SIZE / 2;
+        hd_image_calc_dims(cond_img_size,
+                           (float)vlm_imgs[r].width,
+                           (float)vlm_imgs[r].height,
+                           PATCH, &cw, &ch);
+        int cond_w = cw / (PATCH == 32 ? 32 : PATCH);
+        int cond_h = ch / (PATCH == 32 ? 32 : PATCH);
         if (cond_w < 1) cond_w = 1;
         if (cond_h < 1) cond_h = 1;
+        /* VLM pixel dims == cond grid * 32 (must be well-formed) */
+        {
+            int vlm_w = cond_w * 32, vlm_h = cond_h * 32;
+            if (vlm_w % 32 != 0 || vlm_h % 32 != 0 ||
+                (vlm_w / 16) % 2 != 0 || (vlm_h / 16) % 2 != 0) {
+                hd_set_error("generate: ref %d broken vlm grid %dx%d",
+                             r, vlm_w, vlm_h);
+                free(patches);
+                return HD_ERR_MISMATCH;
+            }
+        }
 
         refs[r].tokens = (int)tokens;
         refs[r].grid_h = gh;
         refs[r].grid_w = gw;
         refs[r].cond_h = cond_h;
         refs[r].cond_w = cond_w;
+        vlm_n[r] = cond_h * cond_w * 4;   /* raw patches N = (2*cond_h)*(2*cond_w) */
+        vlm_gh[r] = cond_h * 2;
+        vlm_gw[r] = cond_w * 2;
 
         /* append to ref_patches */
         float *np = realloc(ref_patches, (total_ref_tokens + tokens) * FF * sizeof(float));
@@ -308,8 +360,47 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     O1_TIMING_BEGIN("PROMPT_TOKENIZE");
     hd_sequence seq;
     memset(&seq, 0, sizeof(seq));
-    st = hd_seq_build(req, PATCH, 151655, 151656, 151652, TMS_ID, 1, 1,
-                      4096, Hh, W, refs, &seq);
+    /* Named reference aliases: expand `@name` in the prompt into explicit
+     * "reference image N" phrases BEFORE tokenization. If the prompt has no
+     * alias, the original prompt is used byte-identically. The alias table is
+     * frontend-only and never affects the reference tensor order. */
+    hd_ref_alias_table alias_tbl;
+    {
+        const char *upaths[HD_SEQ_MAX_REFS];
+        const char *ualiases[HD_SEQ_MAX_REFS];
+        for (int r = 0; r < K; r++) {
+            upaths[r] = req->references[r].path;
+            ualiases[r] = req->references[r].alias;
+        }
+        int arst = hd_ref_alias_build(&alias_tbl, upaths, ualiases, K, NULL, 0);
+        if (arst != HD_OK) {
+            hd_set_error("generate: %s", hd_ref_alias_error());
+            free(ref_patches);
+            return arst;
+        }
+        char *expanded = NULL;
+        arst = hd_ref_alias_expand(&alias_tbl, req->prompt, &expanded);
+        if (arst != HD_OK) {
+            hd_set_error("generate: %s", hd_ref_alias_error());
+            free(ref_patches);
+            return arst;
+        }
+        if (expanded) {
+            if (getenv("O1_VERBOSE_REF")) {
+                hd_ref_alias_dump(&alias_tbl, stderr);
+                fprintf(stderr, "expanded prompt:\n%s\n", expanded);
+            }
+            /* Borrow a temporary request with the expanded prompt. */
+            hd_generation_request req2 = *req;
+            req2.prompt = expanded;
+            st = hd_seq_build(&req2, PATCH, 151655, 151656, 151652, TMS_ID,
+                              1, 1, 4096, Hh, W, refs, &seq);
+            free(expanded);
+        } else {
+            st = hd_seq_build(req, PATCH, 151655, 151656, 151652, TMS_ID, 1, 1,
+                              4096, Hh, W, refs, &seq);
+        }
+    }
     if (st != HD_OK) {
         hd_set_error("generate: sequence: %s", hd_last_error());
         free(ref_patches);
@@ -374,6 +465,214 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
             free(ref_patches);
             return st;
         }
+    }
+
+    /* ---- PATH B: Qwen-VL semantic conditioning (computed ONCE) ---- */
+    /* Resolve the vision tower weights and run the tower on every
+     * reference, concatenating image_embeds / deepstack in reference order
+     * (matching the <image_pad> template order). */
+    hd_visual_cond visual;
+    memset(&visual, 0, sizeof(visual));
+    void *vimg_emb = NULL, *vds0 = NULL, *vds1 = NULL, *vds2 = NULL;
+    uint8_t *vmask_h = NULL, *vmask_dev = NULL;
+    hd_vision_binding vb;
+    hd_vision_workspace vws;
+    memset(&vb, 0, sizeof(vb));
+    memset(&vws, 0, sizeof(vws));
+    {
+        st = hd_vision_resolve(&store, &vb);
+        if (st != HD_OK) {
+            hd_set_error("generate: vision resolve: %s", hd_last_error());
+            hd_forward_binding_free(&bw);
+            hd_weight_store_free(&store);
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
+            return st;
+        }
+        /* V = total merged vision tokens = sum(cond_h*cond_w) */
+        int V_total = 0;
+        int max_N = 0;
+        for (int r = 0; r < K; r++) {
+            V_total += refs[r].cond_h * refs[r].cond_w;
+            if (vlm_n[r] > max_N) max_N = vlm_n[r];
+        }
+        visual.v_tokens = V_total;
+        if (V_total <= 0) {
+            hd_set_error("generate: zero vision tokens");
+            hd_forward_binding_free(&bw);
+            hd_weight_store_free(&store);
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
+            return HD_ERR_MISSING;
+        }
+
+        /* Allocate the vision workspace (sized for max_N raw patches) and
+         * the concatenated output buffers. */
+        int64_t vws_bytes = hd_vision_workspace_bytes(max_N);
+        void *vwsbase = dev_alloc((size_t)vws_bytes);
+        if (!vwsbase) {
+            hd_set_error("generate: vision workspace alloc %lld bytes",
+                         (long long)vws_bytes);
+            hd_forward_binding_free(&bw);
+            hd_weight_store_free(&store);
+            hd_sequence_free(&seq);
+            free(ref_patches);
+            for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
+            return HD_ERR_OOM;
+        }
+        vws.patch_out = vwsbase;
+        vws.bytes = vws_bytes;
+
+        vimg_emb = dev_alloc((size_t)V_total * HD_VISION_OUT_HIDDEN * 2);
+        vds0 = dev_alloc((size_t)V_total * HD_VISION_OUT_HIDDEN * 2);
+        vds1 = dev_alloc((size_t)V_total * HD_VISION_OUT_HIDDEN * 2);
+        vds2 = dev_alloc((size_t)V_total * HD_VISION_OUT_HIDDEN * 2);
+        vmask_h = malloc((size_t)S);
+        if (!vimg_emb || !vds0 || !vds1 || !vds2 || !vmask_h) {
+            hd_set_error("generate: vision buffers oom");
+            goto vision_fail;
+        }
+
+        /* Run the tower once per reference; concatenate in ref order. */
+        int vis_off = 0;
+        for (int r = 0; r < K; r++) {
+            if (!vlm_imgs[r].rgb) continue;
+            int N = vlm_n[r], gh = vlm_gh[r], gw = vlm_gw[r];
+            int V = refs[r].cond_h * refs[r].cond_w;
+            int t = HD_VISION_TEMPORAL_PATCH, m = HD_VISION_MERGE_SIZE;
+            int p = HD_VISION_PATCH_SIZE;
+            /* Resize the original ref EXACTLY to the VLM conditioning grid
+             * (cond_w*32, cond_h*32), matching the oracle
+             * img.resize((cw,ch), LANCZOS). No aspect-preserving scale,
+             * no center crop, no intermediate oversize. The grid is the
+             * same one used for placeholders / patchify / tower output. */
+            int vlm_w = refs[r].cond_w * 32;
+            int vlm_h = refs[r].cond_h * 32;
+            if (vlm_w % 32 != 0 || vlm_h % 32 != 0 ||
+                (vlm_w / 16) % 2 != 0 || (vlm_h / 16) % 2 != 0) {
+                hd_set_error("generate: ref %d bad vlm resize %dx%d",
+                             r, vlm_w, vlm_h);
+                goto vision_fail;
+            }
+            hd_image vlm_resized;
+            memset(&vlm_resized, 0, sizeof(vlm_resized));
+            hd_status vst = hd_image_resize_exact(&vlm_imgs[r], vlm_w, vlm_h,
+                                                  &vlm_resized);
+            hd_image_free(&vlm_imgs[r]);
+            if (vst != HD_OK) {
+                hd_set_error("generate: ref %d vlm resize: %s", r,
+                             hd_last_error());
+                goto vision_fail;
+            }
+            /* normalize to [-1,1] and patchify to [N, C*t*p*p] */
+            float *pv_f32 = malloc((size_t)N * HD_VISION_PATCH_DIM * sizeof(float));
+            if (!pv_f32) {
+                hd_image_free(&vlm_resized);
+                hd_set_error("generate: vlm pv oom");
+                goto vision_fail;
+            }
+            for (int i = 0; i < vlm_resized.width * vlm_resized.height * 3; i++)
+                vlm_resized.rgb[i] = (vlm_resized.rgb[i] - 0.5f) / 0.5f;
+            st = hd_image_to_vlm_patches(&vlm_resized, p, t, m, pv_f32);
+            hd_image_free(&vlm_resized);
+            if (st != HD_OK) {
+                free(pv_f32);
+                hd_set_error("generate: vlm patchify: %s", hd_last_error());
+                goto vision_fail;
+            }
+            void *pv_f32_dev = dev_alloc((size_t)N * HD_VISION_PATCH_DIM * 4);
+            void *pv_dev = dev_alloc((size_t)N * HD_VISION_PATCH_DIM * 2);
+            if (!pv_f32_dev || !pv_dev) {
+                free(pv_f32);
+                hd_set_error("generate: vlm pv dev alloc oom");
+                goto vision_fail;
+            }
+            cudaMemcpy(pv_f32_dev, pv_f32,
+                       (size_t)N * HD_VISION_PATCH_DIM * 4,
+                       cudaMemcpyHostToDevice);
+            hd_f32_convert_bf16(pv_f32_dev, pv_dev,
+                                N * HD_VISION_PATCH_DIM);
+            free(pv_f32);
+            dev_free(pv_f32_dev);
+            if (N % 4 != 0) {
+                hd_set_error("generate: vision N %d not divisible by 4", N);
+                dev_free(pv_dev);
+                goto vision_fail;
+            }
+            /* cuDNN SDPA plan for this N (vision attention, head_dim 72) */
+            if (!vws.sdpa) {
+                hd_sdpa_plan *vplan = NULL;
+                float vscale = (float)(1.0 / sqrt((double)HD_VISION_HEAD_DIM));
+                int vrc = hd_sdpa_create(&vplan, 1, HD_VISION_HEADS,
+                                         HD_VISION_HEADS, N, N,
+                                         HD_VISION_HEAD_DIM, vscale);
+                if (vrc == 0) vws.sdpa = vplan;
+            }
+            void *vds_out[HD_VISION_NUM_DS] = {
+                (uint8_t *)vds0 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
+                (uint8_t *)vds1 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
+                (uint8_t *)vds2 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
+            };
+            st = hd_vision_forward(&vb, &vws, pv_dev, N, gh, gw,
+                                   (uint8_t *)vimg_emb +
+                                       (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
+                                   vds_out);
+            dev_free(pv_dev);
+            cudaDeviceSynchronize();
+            if (st != HD_OK) {
+                hd_set_error("generate: vision forward ref %d: %s", r,
+                             hd_last_error());
+                goto vision_fail;
+            }
+            vis_off += V;
+        }
+
+        /* Build the visual mask: mask[i] = 1 iff i < text_len and
+         * input_ids[i] == 151655 (<image_pad>). Rows >= text_len are 0. */
+        {
+            int count = 0;
+            for (int i = 0; i < S; i++) {
+                int is_pad = (i < text_len && seq.input_ids[i] == 151655);
+                vmask_h[i] = is_pad ? 1 : 0;
+                if (is_pad) count++;
+            }
+            if (count != V_total) {
+                hd_set_error("generate: visual placeholder count %d != %d",
+                             count, V_total);
+                goto vision_fail;
+            }
+            vmask_dev = dev_alloc((size_t)S);
+            if (!vmask_dev) {
+                hd_set_error("generate: visual mask dev alloc oom");
+                goto vision_fail;
+            }
+            cudaMemcpy(vmask_dev, vmask_h, (size_t)S, cudaMemcpyHostToDevice);
+        }
+
+        visual.image_embeds = vimg_emb;
+        visual.deepstack[0] = vds0;
+        visual.deepstack[1] = vds1;
+        visual.deepstack[2] = vds2;
+        visual.visual_mask = vmask_dev;
+        goto vision_done;
+    vision_fail:
+        hd_forward_binding_free(&bw);
+        hd_weight_store_free(&store);
+        hd_sequence_free(&seq);
+        free(ref_patches);
+        if (vwsbase) dev_free(vwsbase);
+        if (vimg_emb) dev_free(vimg_emb);
+        if (vds0) dev_free(vds0);
+        if (vds1) dev_free(vds1);
+        if (vds2) dev_free(vds2);
+        if (vmask_h) free(vmask_h);
+        if (vmask_dev) dev_free(vmask_dev);
+        if (vws.sdpa) hd_sdpa_destroy(vws.sdpa);
+        for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
+        return st;
+    vision_done:;
     }
 
     /* ---- workspace ---- */
@@ -486,9 +785,20 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
 
     /* ---- scheduler ---- */
     hd_scheduler sched;
-    int n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
+    int n_sigmas;
+    /* Dev/Flash recipe: the frozen DEFAULT_TIMESTEPS list is the canonical
+     * 28-step schedule; any other step count derives a linspace ramp
+     * (flash/flow_match), matching pipeline.build_scheduler. */
+    if (req->scheduler == HD_SCHED_DEFAULT)
+        n_sigmas = hd_scheduler_derive_default(&sched, req->steps, req->shift,
+                                               req->noise_clip_std);
+    else if (req->steps <= 1 || req->steps == 28)
+        n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
+    else
+        n_sigmas = hd_scheduler_derive_flash(&sched, req->steps, req->shift,
+                                             req->noise_clip_std);
     if (n_sigmas < req->steps + 1) {
-        hd_set_error("generate: derive_dev returned %d sigmas (need >= %d)",
+        hd_set_error("generate: derive returned %d sigmas (need >= %d)",
                      n_sigmas, req->steps + 1);
         goto fail;
     }
@@ -513,8 +823,8 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
 
         st = hd_forward(&bw, &ws, (const int64_t *)idsd, text_len,
                         (const float *)posd, maskd, vinput_dev, total_img,
-                        tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL,
-                        out_dev, NULL);
+                        &visual, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
+                        NULL, out_dev, NULL);
         if (st != HD_OK) {
             hd_set_error("generate: forward step %d: %s", i, hd_last_error());
             free(noise_step);
@@ -608,6 +918,7 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     if (bad) {
         hd_set_error("generate: final latent contains NaN/Inf");
         free(z_final); free(rgb);
+        z_final = NULL; rgb = NULL;
         goto fail;
     }
     float mn = z_final[0], mx = z_final[0];
@@ -619,6 +930,7 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         hd_set_error("generate: final latent range [%.4f, %.4f] out of bounds",
                      mn, mx);
         free(z_final); free(rgb);
+        z_final = NULL; rgb = NULL;
         goto fail;
     }
     hd_decode_to_rgb(z_final, grid_h, grid_w, PATCH, 3, rgb);
@@ -634,6 +946,14 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
     dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
     dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev);
+    if (vimg_emb) dev_free(vimg_emb);
+    if (vds0) dev_free(vds0);
+    if (vds1) dev_free(vds1);
+    if (vds2) dev_free(vds2);
+    if (vmask_dev) dev_free(vmask_dev);
+    if (vmask_h) free(vmask_h);
+    if (vws.sdpa) hd_sdpa_destroy(vws.sdpa);
+    if (vws.patch_out) dev_free(vws.patch_out);
     hd_forward_binding_free(&bw);
     hd_weight_store_free(&store);
     hd_sequence_free(&seq);
@@ -645,6 +965,14 @@ fail:
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
     dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
     dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev);
+    if (vimg_emb) dev_free(vimg_emb);
+    if (vds0) dev_free(vds0);
+    if (vds1) dev_free(vds1);
+    if (vds2) dev_free(vds2);
+    if (vmask_dev) dev_free(vmask_dev);
+    if (vmask_h) free(vmask_h);
+    if (vws.sdpa) hd_sdpa_destroy(vws.sdpa);
+    if (vws.patch_out) dev_free(vws.patch_out);
     if (z_final) free(z_final);
     if (rgb) free(rgb);
     hd_forward_binding_free(&bw);
@@ -703,6 +1031,18 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     int seq_text_len[2], seq_S[2];
     const char *cap[2] = { req->prompt, " " };
     hd_status st;
+
+    /* Aliases require references; with none, any `@alias` is an error. */
+    {
+        hd_ref_alias_table empty_tbl;
+        hd_ref_alias_build(&empty_tbl, NULL, NULL, 0, NULL, 0);
+        char *expanded = NULL;
+        if (hd_ref_alias_expand(&empty_tbl, cap[0], &expanded) != HD_OK) {
+            hd_set_error("generate: %s", hd_ref_alias_error());
+            return HD_ERR_MISSING;
+        }
+        free(expanded);
+    }
 
     for (int b = 0; b < nbranch; b++) {
         int64_t *ids = NULL;
@@ -940,8 +1280,11 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     if (req->scheduler == HD_SCHED_DEFAULT)
         n_sigmas = hd_scheduler_derive_default(&sched, req->steps, req->shift,
                                                req->noise_clip_std);
-    else
+    else if (req->steps <= 1 || req->steps == 28)
         n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
+    else
+        n_sigmas = hd_scheduler_derive_flash(&sched, req->steps, req->shift,
+                                             req->noise_clip_std);
     if (n_sigmas < req->steps + 1) {
         hd_set_error("generate: derive returned %d sigmas (need >= %d)",
                      n_sigmas, req->steps + 1);
@@ -981,9 +1324,9 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
 
         /* ---- conditional forward ---- */
         st = hd_forward(&bw, &ws, (const int64_t *)idsd[0], text_len,
-                        (const float *)posd[0], maskd[0], z_prev_dev, IMG, tsd,
-                        secd, S, NH, NKV, H, I, HD, TMS_ID, NULL, out_dev,
-                        NULL);
+                        (const float *)posd[0], maskd[0], z_prev_dev, IMG,
+                        NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL,
+                        out_dev, NULL);
         if (st != HD_OK) {
             hd_set_error("generate: forward step %d: %s", i, hd_last_error());
             free(noise_step);
@@ -1003,8 +1346,8 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
                 st = hd_forward(&bw, &ws_uncond,
                                 (const int64_t *)idsd[1], seq_text_len[1],
                                 (const float *)posd[1], maskd[1], z_prev_dev,
-                                IMG, tsd, secd, seq_S_uncond, NH, NKV, H, I,
-                                HD, TMS_ID, NULL, out_uncond_dev, NULL);
+                                IMG, NULL, tsd, secd, seq_S_uncond, NH, NKV, H,
+                                I, HD, TMS_ID, NULL, out_uncond_dev, NULL);
                 if (st != HD_OK) {
                     hd_set_error("generate: forward(uncond) step %d: %s",
                                  i, hd_last_error());
@@ -1141,6 +1484,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     if (bad) {
         hd_set_error("generate: final latent contains NaN/Inf");
         free(z_final); free(rgb);
+        z_final = NULL; rgb = NULL;
         goto fail;
     }
     float mn = z_final[0], mx = z_final[0];
@@ -1152,6 +1496,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         hd_set_error("generate: final latent range [%.4f, %.4f] out of bounds",
                      mn, mx);
         free(z_final); free(rgb);
+        z_final = NULL; rgb = NULL;
         goto fail;
     }
 

@@ -151,21 +151,91 @@ int main(void) {
     ws.patch_out = wsbase;
     ws.bytes = ws_bytes;
 
-    /* cuDNN SDPA plan for the vision attention */
-    {
-        hd_sdpa_plan *plan = NULL;
-        float scale = (float)(1.0 / sqrt((double)HD_VISION_HEAD_DIM));
-        int rc = hd_sdpa_create(&plan, 1, HD_VISION_HEADS, HD_VISION_HEADS,
-                                n, n, HD_VISION_HEAD_DIM, scale);
-        if (rc == 0) ws.sdpa = plan;
-        else printf("note: cuDNN SDPA plan failed (%s); using eager\n",
-                    hd_cuda_last_error());
-    }
-
-    void *ds_out[HD_VISION_NUM_DS] = {ds_d, ds_d, ds_d};
+    /* cuDNN SDPA plan for the vision attention (HD_VISION_EAGER=1 forces the
+             * eager reference backend for A/B comparison). */
+            {
+                const char *eager = getenv("HD_VISION_EAGER");
+                if (!eager || strcmp(eager, "1") != 0) {
+                    hd_sdpa_plan *plan = NULL;
+                    float scale = (float)(1.0 / sqrt((double)HD_VISION_HEAD_DIM));
+                    int rc = hd_sdpa_create(&plan, 1, HD_VISION_HEADS, HD_VISION_HEADS,
+                                            n, n, HD_VISION_HEAD_DIM, scale);
+                    if (rc == 0) ws.sdpa = plan;
+                    else printf("note: cuDNN SDPA plan failed (%s); using eager\n",
+                                hd_cuda_last_error());
+                } else {
+                    printf("note: HD_VISION_EAGER=1, using eager attention\n");
+                }
+            }
+            void *ds_out[HD_VISION_NUM_DS] = {ds_d, ds_d, ds_d};
+    /* deepstack outputs must be distinct buffers: each merger writes its
+     * own [m,4096] (the test previously aliased all three to ds_d, so
+     * deepstack 1/2 overwrote deepstack 0's output). */
+    void *ds1_d = NULL, *ds2_d = NULL;
+    cudaMalloc(&ds1_d, (size_t)m * HD_VISION_OUT_HIDDEN * 2);
+    cudaMalloc(&ds2_d, (size_t)m * HD_VISION_OUT_HIDDEN * 2);
+    ds_out[1] = ds1_d;
+    ds_out[2] = ds2_d;
     void *b0_d = NULL;
     cudaMalloc(&b0_d, (size_t)n * H * 2);
     ws.block0_snap = b0_d;
+
+    /* Block-0 stage snapshots: dedicated device buffers captured DURING the
+     * forward (workspace scratch is recycled by the 27 blocks). */
+    void *b0_snaps[HD_B0_SNAP_COUNT];
+    memset(b0_snaps, 0, sizeof(b0_snaps));
+    size_t nH = (size_t)n * H * 2;
+    size_t nQ = (size_t)n * 3456 * 2;
+    size_t nHD = (size_t)n * HD_VISION_HEADS * HD_VISION_HEAD_DIM * 2;
+    size_t nI = (size_t)n * HD_VISION_INTERMEDIATE * 2;
+    cudaMalloc(&b0_snaps[HD_B0_INPUT], nH);
+    cudaMalloc(&b0_snaps[HD_B0_NORM1], nH);
+    cudaMalloc(&b0_snaps[HD_B0_QKV], nQ);
+    cudaMalloc(&b0_snaps[HD_B0_Q], nHD);
+    cudaMalloc(&b0_snaps[HD_B0_K], nHD);
+    cudaMalloc(&b0_snaps[HD_B0_V], nHD);
+    cudaMalloc(&b0_snaps[HD_B0_Q_ROT], nHD);
+    cudaMalloc(&b0_snaps[HD_B0_K_ROT], nHD);
+    cudaMalloc(&b0_snaps[HD_B0_ATTN_HEADS], nHD);
+    cudaMalloc(&b0_snaps[HD_B0_ATTN_MERGED], nH);
+    cudaMalloc(&b0_snaps[HD_B0_PROJ], nH);
+    cudaMalloc(&b0_snaps[HD_B0_ATTN_RESID], nH);
+    cudaMalloc(&b0_snaps[HD_B0_NORM2], nH);
+    cudaMalloc(&b0_snaps[HD_B0_FC1], nI);
+    cudaMalloc(&b0_snaps[HD_B0_FC2], nH);
+    cudaMalloc(&b0_snaps[HD_B0_OUTPUT], nH);
+    for (int si = 0; si < HD_B0_SNAP_COUNT; si++)
+        ws.block0_snaps[si] = b0_snaps[si];
+
+    /* Block-output snapshots at layers 0,1,2,4,8,16,24,26 */
+    int snap_layers[] = {0, 1, 2, 4, 8, 16, 24, 26};
+    void *block_snaps[HD_VISION_DEPTH];
+    memset(block_snaps, 0, sizeof(block_snaps));
+    for (int si = 0; si < 8; si++) {
+        cudaMalloc(&block_snaps[snap_layers[si]], nH);
+        ws.block_out_snaps[snap_layers[si]] = block_snaps[snap_layers[si]];
+    }
+
+    /* Merger stage snapshots */
+    void *merger_snaps[5];
+    memset(merger_snaps, 0, sizeof(merger_snaps));
+    cudaMalloc(&merger_snaps[0], nH);                    /* norm [n,1152] */
+    cudaMalloc(&merger_snaps[1], (size_t)m * 4608 * 2);  /* merge [m,4608] */
+    cudaMalloc(&merger_snaps[2], (size_t)m * 4608 * 2);  /* fc1 [m,4608] */
+    cudaMalloc(&merger_snaps[3], (size_t)m * 4608 * 2);  /* gelu [m,4608] */
+    cudaMalloc(&merger_snaps[4], (size_t)m * HD_VISION_OUT_HIDDEN * 2); /* fc2 */
+    for (int si = 0; si < 5; si++) ws.merger_snaps[si] = merger_snaps[si];
+
+    /* Deepstack merger 0 snapshots */
+    void *ds_merger_snaps[HD_VISION_NUM_DS][4];
+    memset(ds_merger_snaps, 0, sizeof(ds_merger_snaps));
+    cudaMalloc(&ds_merger_snaps[0][0], (size_t)m * 4608 * 2);
+    cudaMalloc(&ds_merger_snaps[0][1], (size_t)m * 4608 * 2);
+    cudaMalloc(&ds_merger_snaps[0][2], (size_t)m * 4608 * 2);
+    cudaMalloc(&ds_merger_snaps[0][3], (size_t)m * HD_VISION_OUT_HIDDEN * 2);
+    for (int si = 0; si < 4; si++)
+        ws.ds_merger_snaps[0][si] = ds_merger_snaps[0][si];
+
     cudaError_t pre_err = cudaGetLastError();
     if (pre_err != cudaSuccess)
         printf("pre-forward CUDA error: %s\n", cudaGetErrorString(pre_err));
@@ -211,24 +281,6 @@ int main(void) {
         }
     }
 
-    /* ---- compare block0_in (patch_out + pos_emb) ---- */
-    {
-        size_t n_b0 = 0;
-        float *b0_oracle = load_f32("block0_in", &n_b0);
-        if (b0_oracle) {
-            uint16_t *b0_bf16 = malloc((size_t)n * H * 2);
-            float *b0_f32 = malloc((size_t)n * H * sizeof(float));
-            cudaMemcpy(b0_bf16, (uint8_t *)wsbase + (int64_t)n * H * 2 * 3,
-                       (size_t)n * H * 2, cudaMemcpyDeviceToHost);
-            hd_bf16_buf_to_f32(b0_bf16, b0_f32, (size_t)n * H);
-            float c = cosine(b0_f32, b0_oracle, (size_t)n * H);
-            float r = nrmse(b0_f32, b0_oracle, (size_t)n * H);
-            printf("block0_in: cos=%.6f nrmse=%.6f\n", c, r);
-            CHECK(c > 0.99f, "block0_in cosine > 0.99");
-            free(b0_bf16); free(b0_f32); free(b0_oracle);
-        }
-    }
-
     /* ---- compare h_a (patch+pos) against oracle patch+pos sum ---- */
     {
         size_t n_pe = 0, n_pos = 0;
@@ -268,20 +320,27 @@ int main(void) {
         }
     }
 
-    /* ---- compare block0 internal stages (oracle_block0.pt) ---- */
+    /* ---- compare block0 internal stages (oracle_block0.pt) ----
+     * Snapshots were captured DURING the forward at i==0 into dedicated
+     * buffers, so these are the true block-0 values. */
     {
-        const char *stages[] = {"norm1_out", "qkv_out", "attn_out",
-                                "o_proj_out", "norm2_out", "fc1_out",
-                                "fc2_out"};
-        hd_vision_offsets lo;
-        hd_vision_layout(n, m, &lo);
-        int64_t offs[] = {
-            lo.ln1, lo.qkv, lo.attn_out, lo.attn_resid, lo.ln2, lo.fc1, lo.fc2
+        struct { const char *oracle; int slot; size_t nf; } stages[] = {
+            {"block0_input",  HD_B0_INPUT,       (size_t)n * H},
+            {"block0_norm1",  HD_B0_NORM1,       (size_t)n * H},
+            {"block0_qkv",    HD_B0_QKV,         (size_t)n * 3456},
+            /* oracle attn_out is AFTER proj (upstream returns proj output);
+             * compare against our proj stage (attn_resid pre-residual). */
+            {"block0_proj",   HD_B0_PROJ,        (size_t)n * H},
+            {"block0_attn_resid", HD_B0_ATTN_RESID, (size_t)n * H},
+            {"block0_norm2",  HD_B0_NORM2,       (size_t)n * H},
+            {"block0_fc1",    HD_B0_FC1,         (size_t)n * HD_VISION_INTERMEDIATE},
+            {"block0_fc2",    HD_B0_FC2,         (size_t)n * H},
+            {"block0_output", HD_B0_OUTPUT,      (size_t)n * H},
         };
-        for (int s = 0; s < 7; s++) {
+        for (size_t s = 0; s < sizeof(stages) / sizeof(stages[0]); s++) {
             char path[256];
             snprintf(path, sizeof(path), "%s/oracle_block0_%s.bin",
-                     ORACLE_DIR, stages[s]);
+                     ORACLE_DIR, stages[s].oracle);
             FILE *f = fopen(path, "rb");
             if (!f) continue;
             fseek(f, 0, SEEK_END);
@@ -293,12 +352,153 @@ int main(void) {
             size_t nf = (size_t)nbytes / sizeof(float);
             uint16_t *bf16 = malloc(nf * 2);
             float *f32 = malloc(nf * sizeof(float));
-            cudaMemcpy(bf16, (uint8_t *)wsbase + offs[s], nf * 2,
+            cudaMemcpy(bf16, b0_snaps[stages[s].slot], nf * 2,
                        cudaMemcpyDeviceToHost);
             hd_bf16_buf_to_f32(bf16, f32, nf);
             float c = cosine(f32, oracle, nf);
             float r = nrmse(f32, oracle, nf);
-            printf("block0 %s: cos=%.6f nrmse=%.6f\n", stages[s], c, r);
+            printf("block0 %-14s: cos=%.6f nrmse=%.6f\n",
+                   stages[s].oracle, c, r);
+            free(bf16); free(f32); free(oracle);
+        }
+    }
+
+    /* ---- compare q/k/v pre-rope and post-rope (block 0) ----
+     * Native layout: [Hd, n, D] head-major. Oracle layout: [seq, heads, hd].
+     * Compare elementwise with the transpose. */
+    {
+        struct { const char *oracle; int slot; } qkv_stages[] = {
+            {"q_pre",  HD_B0_Q},
+            {"k_pre",  HD_B0_K},
+            {"v",      HD_B0_V},
+            {"q_post", HD_B0_Q_ROT},
+            {"k_post", HD_B0_K_ROT},
+        };
+        int Hd = HD_VISION_HEADS, D = HD_VISION_HEAD_DIM;
+        for (size_t s = 0; s < sizeof(qkv_stages) / sizeof(qkv_stages[0]); s++) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s/oracle_block0_%s.bin",
+                     ORACLE_DIR, qkv_stages[s].oracle);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long nbytes = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            float *oracle = malloc((size_t)nbytes);
+            fread(oracle, 1, (size_t)nbytes, f);
+            fclose(f);
+            size_t nf = (size_t)nbytes / sizeof(float); /* n*Hd*D */
+            uint16_t *bf16 = malloc(nf * 2);
+            float *f32 = malloc(nf * sizeof(float));
+            cudaMemcpy(bf16, b0_snaps[qkv_stages[s].slot], nf * 2,
+                       cudaMemcpyDeviceToHost);
+            hd_bf16_buf_to_f32(bf16, f32, nf);
+            /* native [Hd,n,D] -> oracle [n,Hd,D]: transpose h<->s */
+            float *t32 = malloc(nf * sizeof(float));
+            for (int h = 0; h < Hd; h++)
+                for (int ss = 0; ss < n; ss++)
+                    for (int dd = 0; dd < D; dd++)
+                        t32[((size_t)ss * Hd + h) * D + dd] =
+                            f32[((size_t)h * n + ss) * D + dd];
+            float c = cosine(t32, oracle, nf);
+            float r = nrmse(t32, oracle, nf);
+            printf("block0 %-8s: cos=%.6f nrmse=%.6f\n",
+                   qkv_stages[s].oracle, c, r);
+            free(bf16); free(f32); free(t32); free(oracle);
+        }
+    }
+
+    /* ---- compare block outputs at layers 0,1,2,4,8,16,24,26 ---- */
+    {
+        int snap_layers[] = {0, 1, 2, 4, 8, 16, 24, 26};
+        for (int si = 0; si < 8; si++) {
+            int layer = snap_layers[si];
+            char path[256];
+            snprintf(path, sizeof(path), "%s/oracle_block%d_out.bin",
+                     ORACLE_DIR, layer);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long nbytes = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            float *oracle = malloc((size_t)nbytes);
+            fread(oracle, 1, (size_t)nbytes, f);
+            fclose(f);
+            size_t nf = (size_t)nbytes / sizeof(float);
+            uint16_t *bf16 = malloc(nf * 2);
+            float *f32 = malloc(nf * sizeof(float));
+            cudaMemcpy(bf16, block_snaps[layer], nf * 2,
+                       cudaMemcpyDeviceToHost);
+            hd_bf16_buf_to_f32(bf16, f32, nf);
+            float c = cosine(f32, oracle, nf);
+            float r = nrmse(f32, oracle, nf);
+            printf("block%-2d_out: cos=%.6f nrmse=%.6f\n", layer, c, r);
+            free(bf16); free(f32); free(oracle);
+        }
+    }
+
+    /* ---- compare final merger stages ---- */
+    {
+        /* oracle: merger_norm_out [n,1152], merger_fc1_out [m,4608],
+         * merger_fc2_out [m,4096] (== image_embeds). */
+        struct { const char *oracle; int slot; size_t nf; } mst[] = {
+            {"merger_norm_out", 0, (size_t)n * H},
+            {"merger_fc1_out",  2, (size_t)m * 4608},
+            {"merger_fc2_out",  4, (size_t)m * HD_VISION_OUT_HIDDEN},
+        };
+        for (size_t s = 0; s < sizeof(mst) / sizeof(mst[0]); s++) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s/oracle_%s.bin",
+                     ORACLE_DIR, mst[s].oracle);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long nbytes = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            float *oracle = malloc((size_t)nbytes);
+            fread(oracle, 1, (size_t)nbytes, f);
+            fclose(f);
+            size_t nf = (size_t)nbytes / sizeof(float);
+            uint16_t *bf16 = malloc(nf * 2);
+            float *f32 = malloc(nf * sizeof(float));
+            cudaMemcpy(bf16, merger_snaps[mst[s].slot], nf * 2,
+                       cudaMemcpyDeviceToHost);
+            hd_bf16_buf_to_f32(bf16, f32, nf);
+            float c = cosine(f32, oracle, nf);
+            float r = nrmse(f32, oracle, nf);
+            printf("merger %-14s: cos=%.6f nrmse=%.6f\n", mst[s].oracle, c, r);
+            free(bf16); free(f32); free(oracle);
+        }
+    }
+
+    /* ---- compare deepstack merger 0 stages ---- */
+    {
+        struct { const char *oracle; int slot; size_t nf; } dst[] = {
+            {"ds0_norm_out", 0, (size_t)m * 4608},
+            {"ds0_fc1_out",  1, (size_t)m * 4608},
+            {"ds0_fc2_out",  3, (size_t)m * HD_VISION_OUT_HIDDEN},
+        };
+        for (size_t s = 0; s < sizeof(dst) / sizeof(dst[0]); s++) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s/oracle_%s.bin",
+                     ORACLE_DIR, dst[s].oracle);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long nbytes = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            float *oracle = malloc((size_t)nbytes);
+            fread(oracle, 1, (size_t)nbytes, f);
+            fclose(f);
+            size_t nf = (size_t)nbytes / sizeof(float);
+            uint16_t *bf16 = malloc(nf * 2);
+            float *f32 = malloc(nf * sizeof(float));
+            cudaMemcpy(bf16, ds_merger_snaps[0][dst[s].slot], nf * 2,
+                       cudaMemcpyDeviceToHost);
+            hd_bf16_buf_to_f32(bf16, f32, nf);
+            float c = cosine(f32, oracle, nf);
+            float r = nrmse(f32, oracle, nf);
+            printf("ds0 %-14s: cos=%.6f nrmse=%.6f\n", dst[s].oracle, c, r);
             free(bf16); free(f32); free(oracle);
         }
     }

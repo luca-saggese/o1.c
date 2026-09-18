@@ -25,6 +25,7 @@
  */
 
 #include "forward.h"
+#include "vision_kernels.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -192,6 +193,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
                      const float *pos_f32,
                      const void *mask_dev,
                      const void *vinputs, int img_tokens,
+                     const hd_visual_cond *visual,
                      const float *timestep,
                      const int64_t *sec_dev,
                      int seq, int heads, int kv_heads,
@@ -269,10 +271,23 @@ hd_status hd_forward(const hd_forward_binding *bw,
     if (diag && diag->after_embedding)
         cudaMemcpy(diag->after_embedding, h_text, (size_t)T * H * 2,
                    cudaMemcpyDeviceToDevice);
-    hd_apply_tms_condition(input_ids, h_text, t_emb, h_text,
-                           T, H, tms_token_id);
+    if (visual) {
+        /* masked_scatter: replace <image_pad> rows in h_text with the
+         * vision tower image_embeds. Writes into hidden_a (full [S,H]
+         * row space); the mask has S entries but only the first T rows are
+         * text (rows >= T are 0, and the kernel only iterates [0,T)). */
+        hd_vision_masked_scatter(h_text, visual->visual_mask,
+                                 visual->image_embeds, hidden_a, T, H);
+        hd_apply_tms_condition(input_ids, hidden_a, t_emb, hidden_a,
+                               T, H, tms_token_id);
+    } else {
+        hd_apply_tms_condition(input_ids, h_text, t_emb, h_text,
+                               T, H, tms_token_id);
+        cudaMemcpy(hidden_a, h_text, (size_t)T * H * 2,
+                   cudaMemcpyDeviceToDevice);
+    }
     if (diag && diag->after_timestep_conditioning)
-        cudaMemcpy(diag->after_timestep_conditioning, h_text,
+        cudaMemcpy(diag->after_timestep_conditioning, hidden_a,
                    (size_t)T * H * 2, cudaMemcpyDeviceToDevice);
 
     /* ------------------------------------------------------------------ */
@@ -289,7 +304,6 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* ------------------------------------------------------------------ */
     /* Step 5: hidden_a = cat([h_text, vemb])  [S,H]                      */
     /* ------------------------------------------------------------------ */
-    cudaMemcpy(hidden_a, h_text, (size_t)T * H * 2, cudaMemcpyDeviceToDevice);
     cudaMemcpy((uint8_t *)hidden_a + (size_t)T * H * 2, xe_out,
                (size_t)I * H * 2, cudaMemcpyDeviceToDevice);
     O1_TIMING_END_GPU("EMBEDDING");
@@ -329,9 +343,18 @@ hd_status hd_forward(const hd_forward_binding *bw,
                            cudaMemcpyDeviceToDevice);
         }
 
-        void *tmp = cur_out;
-        cur_out = (void *)cur_in;
-        cur_in = tmp;
+        if (visual && i < 3) {
+            /* DeepStack injection: add deepstack[i] to the <image_pad> rows
+             * of the block output. Result lands in cur_in so the next block
+             * reads it; NO ping-pong swap this iteration. */
+            hd_vision_deepstack_inject(cur_out, visual->visual_mask,
+                                       visual->deepstack[i], (void *)cur_in,
+                                       S, H);
+        } else {
+            void *tmp = cur_out;
+            cur_out = (void *)cur_in;
+            cur_in = tmp;
+        }
     }
     /* After swapping following the final write, cur_in holds the last block
      * output. final_hidden = cur_in. */

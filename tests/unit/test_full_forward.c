@@ -348,7 +348,7 @@ int main(void) {
     cudaEventCreate(&t0); cudaEventCreate(&t1);
     cudaEventRecord(t0, 0);
     st = hd_forward(&bw, &ws, idsd, T, (const float *)posd, maskd,
-                    vind, IMG, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
+                    vind, IMG, NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
                     &diag, out_dev, NULL);
     cudaEventRecord(t1, 0);
     cudaEventSynchronize(t1);

@@ -66,6 +66,10 @@ typedef enum {
 typedef struct {
     const char *path;     /* image path (native decode) */
     hd_reference_role role;
+    /* Optional frontend-only semantic alias for `@name` prompt expansion.
+     * NULL (or empty) means "no explicit alias"; the automatic `@refN`
+     * alias is always available. Never reaches the model/tokenizer. */
+    const char *alias;
 } hd_reference_image;
 
 /* Skeleton/openpose metadata (JSON string, oracle load_layout_bboxes style). */

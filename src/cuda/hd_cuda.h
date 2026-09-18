@@ -100,6 +100,16 @@ void hd_apply_rotary(const void *x_dev, const float *cos_dev,
                      int heads, int seq, int dim);
 
 /*
+ * Vision-tower rotary (apply_rotary_pos_emb_vision parity): identical layout
+ * to hd_apply_rotary, but computes the rotation in FP32 (upcast q/k and
+ * cos/sin) and casts the result to bf16 once at the end, with NO per-op bf16
+ * rounding. Used only by the Qwen3-VL vision tower.
+ */
+void hd_apply_rotary_f32(const void *x_dev, const float *cos_dev,
+                         const float *sin_dev, void *y_dev,
+                         int heads, int seq, int dim);
+
+/*
  * Eager attention (class D): q[heads,seq,dim], k/v[kv_heads,seq,dim],
  * mask[1,1,seq,seq]. Produces scores[heads,seq,seq], probs[heads,seq,seq],
  * out[seq,heads,dim] (seq-major). All bf16, softmax fp32.

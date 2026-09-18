@@ -146,3 +146,50 @@ void hd_apply_rotary(const void *x_dev, const float *cos_dev,
         (const uint16_t *)x_dev, cos_dev, sin_dev, (uint16_t *)y_dev,
         heads, seq, dim);
 }
+
+/*
+ * Vision-tower variant of apply_rotary. The oracle's
+ * apply_rotary_pos_emb_vision upcasts q/k and cos/sin to FP32, applies the
+ * rotation, then casts the result back to the original (bf16) dtype ONCE.
+ * There is no per-op bf16 rounding (unlike the text path). Same indexing /
+ * half-split layout as hd_apply_rotary_kernel.
+ */
+__global__ void hd_apply_rotary_f32_kernel(const uint16_t *__restrict__ x,
+                                           const float *__restrict__ cosd,
+                                           const float *__restrict__ sind,
+                                           uint16_t *__restrict__ y,
+                                           int heads, int seq, int dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)heads * seq;
+    if (idx >= total * dim) return;
+    long e = idx;
+    int d = e % dim;
+    long hs = e / dim;
+    int s = (int)(hs % seq);
+    long src = hs * dim + d;
+    long cbase = (long)s * dim + d;
+
+    int half = dim / 2;
+    long halfe = (d < half) ? (d + half) : (d - half);
+    long src_half = hs * dim + halfe;
+    float x0 = hd_dev_bf16_to_f32(x[src]);
+    float xh = hd_dev_bf16_to_f32(x[src_half]);
+    float c = cosd[cbase];
+    float sn = sind[cbase];
+    float v = (d < half) ? (x0 * c - xh * sn) : (x0 * c + xh * sn);
+    y[src] = hd_dev_f32_to_bf16(v);
+}
+
+void hd_apply_rotary_f32(const void *x_dev, const float *cos_dev,
+                         const float *sin_dev, void *y_dev,
+                         int heads, int seq, int dim) {
+    if (!x_dev || !cos_dev || !sin_dev || !y_dev || heads <= 0 || seq <= 0 || dim <= 0) {
+        snprintf(hd_cuda_errbuf(), 512, "apply_rotary_f32: bad args");
+        return;
+    }
+    long total = (long)heads * seq * dim;
+    long blocks = (total + 255) / 256;
+    hd_apply_rotary_f32_kernel<<<blocks, 256>>>(
+        (const uint16_t *)x_dev, cos_dev, sin_dev, (uint16_t *)y_dev,
+        heads, seq, dim);
+}

@@ -155,15 +155,27 @@ typedef struct {
      * Each entry is a dedicated device buffer owned by the caller; NULL
      * entries are skipped. */
     void *block0_snaps[HD_B0_SNAP_COUNT];
+    /* Optional debug snapshots of block outputs at specific layer indices,
+     * captured DURING the forward. block_out_snaps[i] is the output of
+     * layer i (dedicated device buffer, [n,1152] bf16); NULL = skip. */
+    void *block_out_snaps[HD_VISION_DEPTH];
+    /* Optional debug snapshots of the final merger stages (dedicated
+     * buffers): [0]=norm out [n,1152], [1]=spatial_merge [m,4608],
+     * [2]=fc1 [m,4608], [3]=gelu [m,4608], [4]=fc2/image_embeds [m,4096]. */
+    void *merger_snaps[5];
+    /* Optional debug snapshots of deepstack merger i stages (dedicated
+     * buffers): [i][0]=norm [m,4608], [i][1]=fc1 [m,4608],
+     * [i][2]=gelu [m,4608], [i][3]=fc2 [m,4096]. */
+    void *ds_merger_snaps[HD_VISION_NUM_DS][4];
 } hd_vision_workspace;
 
 /* Workspace region offsets (bytes) for a given token count. Exposed for
  * tests that need to read intermediate buffers back from the workspace. */
 typedef struct {
     int64_t patch_out, pos_emb, rot, h_a, h_b, ln1, attn_resid, ln2, fc2,
-            mlp_resid, q, k, v, qr, kr, qkv, scores, probs, attn_out, fc1,
-            cosf, sinf, merged, merge_norm, merge_fc1, merge_fc2, ds_merged,
-            ds_fc1, ds_fc2, total_bytes;
+            mlp_resid, q, k, v, qr, kr, qkv, scores, probs, mask, attn_out,
+            fc1, cosf, sinf, merged, merge_norm, merge_fc1, merge_fc2,
+            ds_merged, ds_fc1, ds_fc2, total_bytes;
 } hd_vision_offsets;
 
 void hd_vision_layout(int64_t n, int64_t m, hd_vision_offsets *o);

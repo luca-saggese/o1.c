@@ -366,6 +366,30 @@ hd_status hd_image_resize(const hd_image *src, int image_size, int patch_size,
     return HD_OK;
 }
 
+/*
+ * Oracle direct resize parity (pipeline.py VLM conditioning path):
+ *   pil_cond = img.resize((cw, ch), Image.LANCZOS)
+ * Resizes exactly to (new_w, new_h) with the PIL-BICUBIC 4-tap resampler
+ * (closest available native resampler to Lanczos). No aspect-preserving
+ * scale, no center crop, no intermediate oversize: the output dimensions
+ * are exactly the requested ones.
+ * Returns HD_ERR_MISSING if src is NULL or dims are non-positive.
+ */
+hd_status hd_image_resize_exact(const hd_image *src, int new_w, int new_h,
+                                hd_image *out) {
+    out->width = 0; out->height = 0; out->rgb = NULL;
+    if (!src || !src->rgb || new_w <= 0 || new_h <= 0) {
+        hd_set_error("hd_image: resize_exact bad args");
+        return HD_ERR_MISSING;
+    }
+    bicubic_resample(src, new_w, new_h, out);
+    if (!out->rgb) {
+        hd_set_error("hd_image: resize_exact oom");
+        return HD_ERR_OOM;
+    }
+    return HD_OK;
+}
+
 void hd_image_calc_dims(int max_size, float aspect_w, float aspect_h,
                         int patch_size, int *out_w, int *out_h) {
     double ratio = (double)aspect_w / aspect_h;

@@ -89,7 +89,8 @@ SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c \
              src/model/forward.c src/model/scheduler.c src/model/tokenizer.c \
              src/model/lora.c src/model/vision.c \
              src/runtime/sequence.c src/runtime/request.c src/runtime/decode.c \
-             src/runtime/torch_rng.c src/runtime/generate.c src/io/png_wrap.c \
+             src/runtime/ref_alias.c src/runtime/torch_rng.c \
+             src/runtime/generate.c src/io/png_wrap.c \
              src/image/hd_image.c src/image/layout.c src/runtime/o1_timing.c
 OBJS      := $(SRCS:.c=.o)
 
@@ -196,6 +197,16 @@ $(TEST_SEQREF_BIN): $(TEST_SEQREF_OBJS)
 
 test-seq-ref: $(TEST_SEQREF_BIN)
 	./$(TEST_SEQREF_BIN)
+
+TEST_REFALIAS_BIN := build/test_ref_alias
+TEST_REFALIAS_SRCS := tests/unit/test_ref_alias.c src/runtime/ref_alias.c $(CORE_SRCS)
+TEST_REFALIAS_OBJS := $(TEST_REFALIAS_SRCS:.c=.o)
+$(TEST_REFALIAS_BIN): $(TEST_REFALIAS_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_REFALIAS_OBJS) -lm
+
+test-ref-alias: $(TEST_REFALIAS_BIN)
+	./$(TEST_REFALIAS_BIN)
 
 TEST_SEQDIAG_BIN := build/test_seq_diag
 TEST_SEQDIAG_SRCS := tests/unit/test_seq_diag.c src/runtime/sequence.c src/runtime/request.c src/model/tokenizer.c $(CORE_SRCS)

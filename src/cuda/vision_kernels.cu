@@ -120,6 +120,29 @@ void hd_vision_gelu(const void *x, void *y, size_t n) {
         (const uint16_t *)x, (uint16_t *)y, n);
 }
 
+/* Exact GELU: 0.5*x*(1+erf(x/sqrt(2))). Used by the vision patch mergers
+ * (upstream nn.GELU()), NOT the block MLP (gelu_pytorch_tanh). */
+__global__ void hd_vision_gelu_exact_kernel(const uint16_t *__restrict__ x,
+                                            uint16_t *__restrict__ y,
+                                            size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float v = hd_dev_bf16_to_f32(x[i]);
+    float e = erff(v * 0.7071067811865476f);   /* v/sqrt(2) */
+    y[i] = hd_dev_f32_to_bf16(0.5f * v * (1.0f + e));
+}
+
+void hd_vision_gelu_exact(const void *x, void *y, size_t n) {
+    if (!x || !y || n == 0) {
+        snprintf(hd_cuda_errbuf(), 512, "vision_gelu_exact: bad args");
+        return;
+    }
+    size_t threads = 256;
+    size_t blocks = (n + threads - 1) / threads;
+    hd_vision_gelu_exact_kernel<<<blocks, threads>>>(
+        (const uint16_t *)x, (uint16_t *)y, n);
+}
+
 /* pos_embed 4-corner bilinear interpolation (fast_pos_embed_interpolate).
  * Each output row is a weighted sum of 4 pos_embed rows. */
 __global__ void hd_vision_pos_interp_kernel(
@@ -186,22 +209,24 @@ void hd_vision_rot(const float *inv_freq, const int *coords, void *y,
 /* cos/sin from the bf16 rot table [n, 36]: emb = cat([rot, rot], -1) ->
  * [n, 72]; cos = cos(emb), sin = sin(emb) fp32. */
 __global__ void hd_vision_rot_cos_sin_kernel(
-        const uint16_t *__restrict__ rot,   /* [n, half] */
-        float *__restrict__ cosd,           /* [n, 2*half] */
-        float *__restrict__ sind,           /* [n, 2*half] */
+        const uint16_t *__restrict__ rot,   /* [n, 2*half] = [n, 36] */
+        float *__restrict__ cosd,           /* [n, 4*half] = [n, 72] */
+        float *__restrict__ sind,           /* [n, 4*half] = [n, 72] */
         int n, int half) {
     int row = blockIdx.x;
     if (row >= n) return;
+    int rot_dim = 2 * half;   /* 36 */
+    int dim     = 2 * rot_dim; /* 72 */
     int t = threadIdx.x;
     int nt = blockDim.x;
-    const uint16_t *rr = rot + (size_t)row * half;
-    float *cr = cosd + (size_t)row * (2 * half);
-    float *sr = sind + (size_t)row * (2 * half);
-    for (int k = t; k < half; k += nt) {
+    const uint16_t *rr = rot + (size_t)row * rot_dim;
+    float *cr = cosd + (size_t)row * dim;
+    float *sr = sind + (size_t)row * dim;
+    for (int k = t; k < rot_dim; k += nt) {
         float v = hd_dev_bf16_to_f32(rr[k]);
         float c = cosf(v), s = sinf(v);
-        cr[k] = c; cr[half + k] = c;
-        sr[k] = s; sr[half + k] = s;
+        cr[k] = c; cr[rot_dim + k] = c;
+        sr[k] = s; sr[rot_dim + k] = s;
     }
 }
 

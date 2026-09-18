@@ -157,6 +157,8 @@ build/hidream [options]
   --prompt TEXT           user prompt
   --mode t2i|edit|personalize|...   generation mode (default: t2i)
   --ref-image PATH        reference image (repeatable, max 10)
+  --ref-image NAME=PATH   named reference; refer to it as @NAME in --prompt
+  --verbose               print the reference alias mapping + expanded prompt
   --keep-original-aspect  single ref: derive output dims from ref
   --layout-bboxes JSON    layout bboxes for personalize+layout
   --width N               output width (default: 1024)
@@ -183,6 +185,50 @@ Example:
   --output out.png
 ```
 
+## Named reference images
+
+References can carry an optional semantic **name** with `--ref-image NAME=PATH`,
+and the prompt can refer to them with `@NAME`:
+
+```sh
+./build/hidream --model dev --mode personalize \
+  --ref-image person=person.jpg \
+  --ref-image shirt=shirt.jpg \
+  --prompt '@person wearing @shirt' \
+  --steps 28 --seed 123456 --output out.png
+```
+
+Every reference also gets an automatic alias `@refN` (N = 1-based position on
+the command line), so `@ref1`, `@ref2`, … always work, with or without an
+explicit name:
+
+```sh
+./build/hidream --model dev --mode personalize \
+  --ref-image face.jpg --ref-image clothes.jpg \
+  --prompt 'Use the identity from @ref1 and the clothes from @ref2' \
+  --steps 28 --seed 123456 --output out.png
+```
+
+Key points:
+
+- `@name` is a **prompt-side alias only**. It does **not** add a new model
+  token, change the tokenizer vocabulary, or modify the reference image
+  encoding. Aliases are expanded away before tokenization.
+- References retain their **original command-line order**; aliases never
+  reorder the reference tensors, `ref_patches`, `image_embeds` or DeepStack.
+- A prompt with **no** `@alias` is used byte-identically (the reference
+  mapping header is only injected when at least one alias is present).
+- Invalid aliases fail closed: duplicates (`duplicate reference alias: x`),
+  empty/whitespace names and reserved names starting with `__` are rejected.
+  An **unknown** `@token` in the prompt is **not** an error: it is left
+  verbatim in the prompt (e.g. `@foo` stays `@foo`).
+- Alias grammar: `[A-Za-z_][A-Za-z0-9_-]*` (e.g. `person`, `person_1`,
+  `dress-blue`, `pose_front`). `--ref-image a/b=c/d.png` keeps the whole
+  string as a path because `a/b` is not a valid alias.
+- The mapping is printed with `--verbose` (or `O1_VERBOSE_REF=1`).
+- C API: `hd_reference_image.alias` (optional, `NULL` for none) selects the
+  same behaviour programmatically.
+
 ## Generation examples
 
 Runnable native CLI examples for every official HiDream-O1 generation type
@@ -202,6 +248,7 @@ and the generated output image.
 | `test-png` / `test-image` | PNG encode/decode, image I/O |
 | `test-layout` | layout conditioning sequence (bit-exact) |
 | `test-seq` / `test-seq-ref` | sequence builder parity vs M1.4 fixture / oracle ground truth |
+| `test-ref-alias` | named reference alias parser, table, expansion (frontend-only) |
 | `test-seq-diag` | sequence manifest diagnostics + workspace estimate |
 | `test-seq-profiles` | frozen per-mode sequence geometry (perf freeze §70) |
 | `test-decode` | output decode (unpatchify) |

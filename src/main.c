@@ -4,6 +4,7 @@
 #include "o1_timing.h"
 #include "png_wrap.h"
 #include "request.h"
+#include "ref_alias.h"
 #include "safetensors.h"
 #include "weights.h"
 
@@ -19,6 +20,8 @@ static void usage(const char *argv0) {
     printf("  --prompt TEXT           user prompt\n");
     printf("  --mode t2i|edit|personalize|...   generation mode (default: t2i)\n");
     printf("  --ref-image PATH        reference image (repeatable, edit/personalize)\n");
+    printf("  --ref-image NAME=PATH   named reference; use @NAME in --prompt\n");
+    printf("  --verbose               print reference alias mapping / expanded prompt\n");
     printf("  --width N               output width (default: 1024)\n");
     printf("  --height N              output height (default: 1024)\n");
     printf("  --steps N               inference steps (default per profile)\n");
@@ -117,6 +120,8 @@ int main(int argc, char **argv) {
     int lora_count = 0;
     hd_reference_image refs[10];
     int ref_count = 0;
+    char ref_aliases[10][128];
+    int verbose = 0;
     int keep_original_aspect = 0;
     const char *layout_bboxes = NULL;
 
@@ -181,9 +186,30 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --ref-image (max 10)\n");
                 return 2;
             }
-            refs[ref_count].path = argv[++i];
+            const char *alias = NULL, *rpath = NULL;
+            if (hd_ref_alias_split(argv[++i], &alias, &rpath) != HD_OK) {
+                fprintf(stderr, "invalid --ref-image: %s\n", argv[i]);
+                return 2;
+            }
+            if (alias) {
+                /* alias points at the argument prefix; materialize it. */
+                size_t an = (size_t)(strchr(alias, '=') - alias);
+                if (an >= sizeof(ref_aliases[ref_count])) {
+                    fprintf(stderr, "reference alias too long\n");
+                    return 2;
+                }
+                memcpy(ref_aliases[ref_count], alias, an);
+                ref_aliases[ref_count][an] = '\0';
+                refs[ref_count].alias = ref_aliases[ref_count];
+            } else {
+                ref_aliases[ref_count][0] = '\0';
+                refs[ref_count].alias = NULL;
+            }
+            refs[ref_count].path = rpath;
             refs[ref_count].role = HD_REF_SUBJECT;
             ref_count++;
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            verbose = 1;
         } else if (strcmp(argv[i], "--keep-original-aspect") == 0) {
             keep_original_aspect = 1;
         } else if (strcmp(argv[i], "--layout-bboxes") == 0 && i + 1 < argc) {
@@ -226,6 +252,7 @@ int main(int argc, char **argv) {
         req.references = ref_count > 0 ? refs : NULL;
         req.reference_count = (size_t)ref_count;
         req.keep_original_aspect = keep_original_aspect;
+        if (verbose) setenv("O1_VERBOSE_REF", "1", 1);
 
         if (layout_bboxes) {
             hd_layout_condition *layout_conds = NULL;

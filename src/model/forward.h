@@ -116,6 +116,15 @@ int64_t hd_forward_workspace_bytes(int64_t seq, int img_tokens, int heads,
                                    int kv_heads, int hidden, int ff_hidden,
                                    int head_dim, int64_t *block_scratch_bytes);
 
+/* Optional visual conditioning (ref/edit/personalize modes). All device
+ * pointers, bf16. NULL visual keeps the plain T2I path. */
+typedef struct {
+    const void *image_embeds;   /* [V, 4096] bf16 vision tower output */
+    const void *deepstack[3];   /* [V, 4096] bf16 each */
+    const uint8_t *visual_mask; /* [S] uint8: 1 at <image_pad> rows */
+    int v_tokens;               /* V */
+} hd_visual_cond;
+
 /*
  * Run the FULL transformer forward, batch 1. Inputs must be device-resident
  * (caller staged). Outputs x_pred written to ws->head_out when bw->head_out_sel
@@ -126,6 +135,7 @@ int64_t hd_forward_workspace_bytes(int64_t seq, int img_tokens, int heads,
  *   pos_f32     [3,1,seq] fp32 device  (frozen position ids as fp32)
  *   mask_dev    [1,1,seq,seq] bf16 device attention mask
  *   vinputs     [img,3072] bf16 device (pixel_unshuffled target/input)
+ *   visual      optional visual conditioning (NULL for plain T2I)
  *   timestep    [1] fp32 device
  *   sec_dev     [3] int64 device (MRoPE section, resident)
  *   diag        optional diagnostic export buffers (may be NULL)
@@ -137,6 +147,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
                      const float *pos_f32,
                      const void *mask_dev,
                      const void *vinputs, int img_tokens,
+                     const hd_visual_cond *visual,
                      const float *timestep,
                      const int64_t *sec_dev,
                      int seq, int heads, int kv_heads,

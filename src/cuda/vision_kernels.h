@@ -22,6 +22,10 @@ void hd_vision_layernorm(const void *x, const void *w, const void *b,
 
 void hd_vision_gelu(const void *x, void *y, size_t n);
 
+/* Exact GELU (erf) used by the vision patch mergers (nn.GELU() upstream),
+ * distinct from the block MLP's gelu_pytorch_tanh. */
+void hd_vision_gelu_exact(const void *x, void *y, size_t n);
+
 void hd_vision_pos_interp(const void *pos_embed, const int *idx,
                           const float *wgt, void *y, int n, int hidden);
 
