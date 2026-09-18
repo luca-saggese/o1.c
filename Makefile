@@ -28,7 +28,8 @@ CUBIN      := build/obj/cuda
 CUDA_OBJS  := $(CUBIN)/support.o $(CUBIN)/norm.o $(CUBIN)/act.o \
               $(CUBIN)/gemm.o $(CUBIN)/rope.o $(CUBIN)/attn.o \
               $(CUBIN)/residual.o $(CUBIN)/embed.o $(CUBIN)/sched.o \
-              $(CUBIN)/hd_cudnn_sdpa.o $(CUBIN)/lora_merge.o
+              $(CUBIN)/hd_cudnn_sdpa.o $(CUBIN)/lora_merge.o \
+              $(CUBIN)/vision_kernels.o
 TEST_P_BIN := build/test_primitives
 TEST_P_SRCS := tests/unit/test_primitives.c $(CORE_SRCS)
 TEST_P_OBJS := $(TEST_P_SRCS:.c=.o)
@@ -82,7 +83,7 @@ TEST_M15_OBJS := $(TEST_M15_SRCS:.c=.o)
 
 SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c \
              src/model/forward.c src/model/scheduler.c src/model/tokenizer.c \
-             src/model/lora.c \
+             src/model/lora.c src/model/vision.c \
              src/runtime/sequence.c src/runtime/request.c src/runtime/decode.c \
              src/runtime/torch_rng.c src/runtime/generate.c src/io/png_wrap.c \
              src/image/hd_image.c src/image/layout.c src/runtime/o1_timing.c
