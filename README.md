@@ -231,12 +231,135 @@ Key points:
 
 ## Generation examples
 
-Runnable native CLI examples for every official HiDream-O1 generation type
-(Text-to-Image, Instruction-Based Editing, Multi-Reference Personalization,
-Personalization + Skeleton, Personalization + Layout, keep-original-aspect)
-are in [`example_assets/README.md`](example_assets/README.md), using the
-upstream sample assets and prompts. Each example includes the exact command
-and the generated output image.
+The repository includes sample inputs and generated outputs under
+[`example_assets/`](example_assets/). Run the commands below from the
+repository root after building `build/hidream`.
+
+| Feature | Mode/options | Input assets | Example output |
+|---------|--------------|--------------|----------------|
+| Text-to-image | `--mode t2i` | prompt only | [`generated/t2i_dev.png`](example_assets/generated/t2i_dev.png) |
+| Instruction-based editing | `--mode edit` | [`edit/test.jpg`](example_assets/edit/test.jpg) | [`generated/edit.png`](example_assets/generated/edit.png) |
+| Multi-reference personalization | `--mode personalize` | [`IP/1.jpg` … `IP/10.jpg`](example_assets/IP/) | [`generated/personalize.png`](example_assets/generated/personalize.png) |
+| Skeleton-guided composition | `--mode personalize` with face, background, pose and part references | [`IP_skeleton/`](example_assets/IP_skeleton/) | [`generated/skeleton.png`](example_assets/generated/skeleton.png) |
+| Personalization with layout | `--mode layout --layout-bboxes` | [`IP_layout/0.jpg`](example_assets/IP_layout/0.jpg), [`IP_layout/1.jpg`](example_assets/IP_layout/1.jpg) | [`generated/layout.png`](example_assets/generated/layout.png) |
+| Preserve source aspect ratio | `--keep-original-aspect` | [`edit/test.jpg`](example_assets/edit/test.jpg) | [`generated/edit_keep_aspect.png`](example_assets/generated/edit_keep_aspect.png) |
+
+The examples use the materialized Dev GGUF at
+`artifacts/models/hidream-o1-dev-bf16.gguf`. Omit `--model-dir` to use the
+path configured by the selected profile.
+
+### Text-to-image (Dev)
+
+```sh
+./build/hidream --model dev \
+  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+  --prompt "A dog holds a sign that says HiDream-O1-Image release." \
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output example_assets/generated/t2i_dev.png
+```
+
+### Text-to-image (Base + FlowUniPC/CFG)
+
+The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
+
+```sh
+./build/hidream --model base \
+  --prompt "A cinematic portrait in soft natural light." \
+  --width 1024 --height 1024 --steps 50 --seed 42 \
+  --output example_assets/generated/t2i_base.png
+```
+
+### Instruction-based editing
+
+```sh
+./build/hidream --model dev \
+  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode edit \
+  --ref-image example_assets/edit/test.jpg \
+  --prompt "remove the earphones" \
+  --width 1024 --height 1024 --steps 1 --seed 42 \
+  --output example_assets/generated/edit.png
+```
+
+### Multi-reference personalization
+
+```sh
+./build/hidream --model dev \
+  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode personalize \
+  --ref-image example_assets/IP/1.jpg \
+  --ref-image example_assets/IP/2.jpg \
+  --ref-image example_assets/IP/3.jpg \
+  --ref-image example_assets/IP/4.jpg \
+  --ref-image example_assets/IP/5.jpg \
+  --ref-image example_assets/IP/6.jpg \
+  --ref-image example_assets/IP/7.jpg \
+  --ref-image example_assets/IP/8.jpg \
+  --ref-image example_assets/IP/9.jpg \
+  --ref-image example_assets/IP/10.jpg \
+  --prompt "Create a coherent portrait using the supplied subject references." \
+  --width 1024 --height 1024 --steps 1 --seed 42 \
+  --output example_assets/generated/personalize.png
+```
+
+References may also be named and used in the prompt with the
+[`@alias` syntax](#named-reference-images).
+
+### Skeleton-guided multi-reference composition
+
+Skeleton conditioning uses the face, background, OpenPose and body-part
+images as an ordered multi-reference personalization request:
+
+```sh
+./build/hidream --model dev \
+  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode personalize \
+  --ref-image example_assets/IP_skeleton/0.face.jpg \
+  --ref-image example_assets/IP_skeleton/0.bg.jpg \
+  --ref-image example_assets/IP_skeleton/0.openpose.jpg \
+  --ref-image example_assets/IP_skeleton/0.part_1.jpg \
+  --ref-image example_assets/IP_skeleton/0.part_2.jpg \
+  --ref-image example_assets/IP_skeleton/0.part_3.jpg \
+  --prompt "Create a realistic try-on image of the person wearing the provided clothing." \
+  --width 1024 --height 1024 --steps 1 --seed 42 \
+  --output example_assets/generated/skeleton.png
+```
+
+### Personalization with layout
+
+Bounding boxes use normalized `[x_min, x_max, y_min, y_max]` coordinates and
+follow the same order as the reference images:
+
+```sh
+./build/hidream --model dev \
+  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode layout \
+  --ref-image person=example_assets/IP_layout/0.jpg \
+  --ref-image object=example_assets/IP_layout/1.jpg \
+  --layout-bboxes "[[0.20507812,0.43945312,0.48828125,0.7421875],[0.57617188,0.80078125,0.08789062,0.34179688]]" \
+  --prompt "@person and @object arranged according to the supplied layout." \
+  --width 1024 --height 1024 --steps 1 --seed 42 \
+  --output example_assets/generated/layout.png
+```
+
+### Preserve the original aspect ratio
+
+With one reference, `--keep-original-aspect` derives patch-aligned output
+dimensions from the source image:
+
+```sh
+./build/hidream --model dev \
+  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode edit \
+  --ref-image example_assets/edit/test.jpg \
+  --keep-original-aspect \
+  --prompt "remove the earphones" \
+  --steps 1 --seed 42 \
+  --output example_assets/generated/edit_keep_aspect.png
+```
+
+See [`example_assets/README.md`](example_assets/README.md) for attribution,
+additional context and the upstream prompts associated with these assets.
 
 ## Test suite
 
