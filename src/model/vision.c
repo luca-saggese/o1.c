@@ -31,6 +31,20 @@
 #include <cuda_runtime.h>
 
 #include "cuda_internal.h"
+
+/* Temporary stage-check macro for the vision tower bring-up. */
+#define CUDA_STAGE_CHECK(name) do { \
+    cudaError_t e1 = cudaGetLastError(); \
+    if (e1 != cudaSuccess) { \
+        fprintf(stderr, "%s launch: %s\n", name, cudaGetErrorString(e1)); \
+        abort(); \
+    } \
+    cudaError_t e2 = cudaDeviceSynchronize(); \
+    if (e2 != cudaSuccess) { \
+        fprintf(stderr, "%s sync: %s\n", name, cudaGetErrorString(e2)); \
+        abort(); \
+    } \
+} while (0)
 #include "gemm.h"
 #include "vision_kernels.h"
 
@@ -130,19 +144,12 @@ hd_status hd_vision_resolve(const hd_weight_store *wstore,
 
 /* Byte offsets of every workspace region, in allocation order. The forward
  * carves identical pointers every call (no rebinding). */
-typedef struct {
-    int64_t patch_out, pos_emb, rot, h_a, h_b, ln1, attn_resid, ln2, fc2,
-            mlp_resid, q, k, v, qr, kr, qkv, scores, probs, attn_out, fc1,
-            cosf, sinf, merged, merge_norm, merge_fc1, merge_fc2, ds_merged,
-            ds_fc1, ds_fc2;
-} hd_vision_offsets;
-
-static void vision_layout(int64_t n, int64_t m, hd_vision_offsets *o) {
-    int64_t b = 0;
+void hd_vision_layout(int64_t n, int64_t m, hd_vision_offsets *o) {
     int64_t H = HD_VISION_HIDDEN, D = HD_VISION_HEAD_DIM;
     int64_t Hd = HD_VISION_HEADS, I = HD_VISION_INTERMEDIATE;
     int64_t O = HD_VISION_OUT_HIDDEN;
     int64_t bf16 = 2;
+    int64_t b = 0;
     o->patch_out = b; b += n * H * bf16;
     o->pos_emb   = b; b += n * H * bf16;
     o->rot       = b; b += n * H * bf16;
@@ -172,14 +179,22 @@ static void vision_layout(int64_t n, int64_t m, hd_vision_offsets *o) {
     o->ds_merged = b; b += m * 4608 * bf16;
     o->ds_fc1    = b; b += m * 4608 * bf16;
     o->ds_fc2    = b; b += m * O * bf16;
+    o->total_bytes = b;
 }
 
 int64_t hd_vision_workspace_bytes(int64_t n) {
     int64_t m = n / (HD_VISION_MERGE_SIZE * HD_VISION_MERGE_SIZE);
     if (m < 1) m = 1;
     hd_vision_offsets o;
-    vision_layout(n, m, &o);
-    return o.ds_fc2 + m * HD_VISION_OUT_HIDDEN * 2;
+    hd_vision_layout(n, m, &o);
+    fprintf(stderr,
+            "VISION_LAYOUT_BUILD %s %s n=%lld rot=%lld ds_fc2=%lld total=%lld\n",
+            __DATE__, __TIME__,
+            (long long)n,
+            (long long)o.rot,
+            (long long)o.ds_fc2,
+            (long long)o.total_bytes);
+    return o.total_bytes;
 }
 
 /* ------------------------------------------------------------------ */
@@ -194,31 +209,46 @@ int64_t hd_vision_workspace_bytes(int64_t n) {
  * Build the 4-corner bilinear interpolation tables for fast_pos_embed_
  * interpolate. grid_h x grid_w patches; pos_embed has num_grid_per_side
  * rows per side (48). Returns malloc'd idx[4*n] and wgt[4*n] int/float.
+ *
+ * The oracle applies the spatial-merge permute AFTER interpolation:
+ *   view(t, h//m, m, w//m, m, -1).permute(0,1,3,2,4,5).flatten(0,4)
+ * so the output rows are in (bh, bw, mh, mw) order, NOT (h, w) row-major.
+ * We fold that ordering into the table: output row (bh,bw,mh,mw) samples
+ * the pos_embed grid at h = bh*m+mh, w = bw*m+mw.
  */
 static void build_pos_interp(int grid_h, int grid_w, int num_grid_per_side,
-                             int **idx_out, float **wgt_out) {
-    int n = grid_h * grid_w;
+                             int merge_size, int **idx_out, float **wgt_out) {
+    int m = merge_size;
+    int mh = grid_h / m, mw = grid_w / m;
+    int n = mh * mw * m * m;
     int *idx = malloc((size_t)4 * n * sizeof(int));
     float *wgt = malloc((size_t)4 * n * sizeof(float));
-    for (int h = 0; h < grid_h; h++) {
-        float hf = (float)h * (float)(num_grid_per_side - 1) / (float)(grid_h - 1);
-        int hf0 = (int)hf;
-        int hf1 = hf0 + 1 < num_grid_per_side ? hf0 + 1 : num_grid_per_side - 1;
-        float dh = hf - (float)hf0;
-        for (int w = 0; w < grid_w; w++) {
-            float wf = (float)w * (float)(num_grid_per_side - 1) / (float)(grid_w - 1);
-            int wf0 = (int)wf;
-            int wf1 = wf0 + 1 < num_grid_per_side ? wf0 + 1 : num_grid_per_side - 1;
-            float dw = wf - (float)wf0;
-            int row = h * grid_w + w;
-            idx[row] = hf0 * num_grid_per_side + wf0;
-            idx[n + row] = hf0 * num_grid_per_side + wf1;
-            idx[2 * n + row] = hf1 * num_grid_per_side + wf0;
-            idx[3 * n + row] = hf1 * num_grid_per_side + wf1;
-            wgt[row] = (1.0f - dh) * (1.0f - dw);
-            wgt[n + row] = (1.0f - dh) * dw;
-            wgt[2 * n + row] = dh * (1.0f - dw);
-            wgt[3 * n + row] = dh * dw;
+    int row = 0;
+    for (int bh = 0; bh < mh; bh++) {
+        for (int bw = 0; bw < mw; bw++) {
+            for (int mh_i = 0; mh_i < m; mh_i++) {
+                for (int mw_i = 0; mw_i < m; mw_i++) {
+                    int h = bh * m + mh_i;
+                    int w = bw * m + mw_i;
+                    float hf = (float)h * (float)(num_grid_per_side - 1) / (float)(grid_h - 1);
+                    int hf0 = (int)hf;
+                    int hf1 = hf0 + 1 < num_grid_per_side ? hf0 + 1 : num_grid_per_side - 1;
+                    float dh = hf - (float)hf0;
+                    float wf = (float)w * (float)(num_grid_per_side - 1) / (float)(grid_w - 1);
+                    int wf0 = (int)wf;
+                    int wf1 = wf0 + 1 < num_grid_per_side ? wf0 + 1 : num_grid_per_side - 1;
+                    float dw = wf - (float)wf0;
+                    idx[row] = hf0 * num_grid_per_side + wf0;
+                    idx[n + row] = hf0 * num_grid_per_side + wf1;
+                    idx[2 * n + row] = hf1 * num_grid_per_side + wf0;
+                    idx[3 * n + row] = hf1 * num_grid_per_side + wf1;
+                    wgt[row] = (1.0f - dh) * (1.0f - dw);
+                    wgt[n + row] = (1.0f - dh) * dw;
+                    wgt[2 * n + row] = dh * (1.0f - dw);
+                    wgt[3 * n + row] = dh * dw;
+                    row++;
+                }
+            }
         }
     }
     *idx_out = idx;
@@ -283,7 +313,7 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
     float scaling = (float)(1.0 / sqrt((double)D));
 
     hd_vision_offsets o;
-    vision_layout(n, m, &o);
+    hd_vision_layout(n, m, &o);
     uint8_t *base = (uint8_t *)ws->patch_out;
     void *patch_out = base + o.patch_out;
     void *pos_emb   = base + o.pos_emb;
@@ -320,11 +350,12 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
         hd_vision_patch(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
                      patch_out, n, HD_VISION_PATCH_DIM, H);
     }
+    CUDA_STAGE_CHECK("hd_vision_patch");
 
     /* ---- pos_embed interpolate + add ---- */
     {
         int *idx = NULL; float *wgt = NULL;
-        build_pos_interp(grid_h, grid_w, 48, &idx, &wgt);
+        build_pos_interp(grid_h, grid_w, 48, HD_VISION_MERGE_SIZE, &idx, &wgt);
         int *idx_d = NULL; float *wgt_d = NULL;
         cudaMalloc(&idx_d, (size_t)4 * n * sizeof(int));
         cudaMalloc(&wgt_d, (size_t)4 * n * sizeof(float));
@@ -341,6 +372,7 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
         /* hidden = patch_out + pos_emb -> h_a */
         hd_residual_add(patch_out, pos_emb, h_a, (size_t)n * H);
     }
+    CUDA_STAGE_CHECK("hd_vision_pos_interp + residual_add");
 
     /* ---- rot_pos_emb -> cos/sin ---- */
     {
@@ -387,11 +419,11 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
              * [n, Hd*D]. Normalize to seq-major in attn_out. */
             int sdpa_ok = 0;
             if (ws->sdpa) {
-                int rc = hd_sdpa_execute(ws->sdpa, qr, kr, v, NULL, attn_out, 0);
+                int rc = hd_sdpa_execute(ws->sdpa, qr, kr, v, NULL, qkv, 0);
                 if (rc == 0) {
-                    /* attn_out currently head-major [Hd, n, D]; merge to
-                     * seq-major via the transpose kernel. */
-                    hd_vision_attn_merge(attn_out, attn_out, Hd, n, D);
+                    /* qkv is free after qkv_split: use it as the head-major
+                     * temp buffer, then transpose to seq-major attn_out. */
+                    hd_vision_attn_merge(qkv, attn_out, Hd, n, D);
                     sdpa_ok = 1;
                 }
             }
@@ -411,6 +443,32 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
             hd_linear(fc1, blk->fc2_w, blk->fc2_b, fc2, n, H, I, 1);
             /* residual: mlp_resid = attn_resid + fc2 */
             hd_residual_add(attn_resid, fc2, mlp_resid, (size_t)n * H);
+
+            /* Block-0 debug snapshots: capture at the exact execution point
+             * into dedicated buffers (the workspace scratch is reused by
+             * later blocks, so it cannot be read back after the forward). */
+            if (i == 0 && ws->block0_snaps) {
+                void **s = ws->block0_snaps;
+                size_t nH = (size_t)n * H * 2;
+                size_t nQ = (size_t)n * 3456 * 2;
+                size_t nHD = (size_t)n * Hd * D * 2;
+                if (s[HD_B0_INPUT]) cudaMemcpy(s[HD_B0_INPUT], cur_in, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_NORM1]) cudaMemcpy(s[HD_B0_NORM1], ln1, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_QKV]) cudaMemcpy(s[HD_B0_QKV], qkv, nQ, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_Q]) cudaMemcpy(s[HD_B0_Q], q, nHD, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_K]) cudaMemcpy(s[HD_B0_K], k, nHD, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_V]) cudaMemcpy(s[HD_B0_V], v, nHD, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_Q_ROT]) cudaMemcpy(s[HD_B0_Q_ROT], qr, nHD, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_K_ROT]) cudaMemcpy(s[HD_B0_K_ROT], kr, nHD, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_ATTN_HEADS]) cudaMemcpy(s[HD_B0_ATTN_HEADS], qkv, nHD, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_ATTN_MERGED]) cudaMemcpy(s[HD_B0_ATTN_MERGED], attn_out, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_PROJ]) cudaMemcpy(s[HD_B0_PROJ], attn_resid, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_ATTN_RESID]) cudaMemcpy(s[HD_B0_ATTN_RESID], attn_resid, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_NORM2]) cudaMemcpy(s[HD_B0_NORM2], ln2, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_FC1]) cudaMemcpy(s[HD_B0_FC1], fc1, (size_t)n * I * 2, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_FC2]) cudaMemcpy(s[HD_B0_FC2], fc2, nH, cudaMemcpyDeviceToDevice);
+                if (s[HD_B0_OUTPUT]) cudaMemcpy(s[HD_B0_OUTPUT], mlp_resid, nH, cudaMemcpyDeviceToDevice);
+            }
 
             /* deepstack capture at layers 8/16/24 */
             if (deepstack_out) {
@@ -433,12 +491,17 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
                 }
             }
 
+            /* copy mlp_resid into cur_out FIRST, then swap so the next
+             * iteration reads the fresh output. */
+            cudaMemcpy(cur_out, mlp_resid, (size_t)n * H * 2,
+                       cudaMemcpyDeviceToDevice);
+            if (i == 0 && ws->block0_snap) {
+                cudaMemcpy(ws->block0_snap, mlp_resid, (size_t)n * H * 2,
+                           cudaMemcpyDeviceToDevice);
+            }
             void *tmp = cur_out;
             cur_out = (void *)cur_in;
             cur_in = tmp;
-            /* copy mlp_resid into cur_out for the next iteration */
-            cudaMemcpy(cur_out, mlp_resid, (size_t)n * H * 2,
-                       cudaMemcpyDeviceToDevice);
         }
     }
 

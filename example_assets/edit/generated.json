@@ -1,0 +1,14 @@
+{
+  "model": "dev",
+  "mode": "edit",
+  "width": 1024,
+  "height": 1024,
+  "steps": 28,
+  "seed": 123456,
+  "precision": "bf16",
+  "scheduler": "flash",
+  "guidance_scale": 0.0000,
+  "shift": 1.0000,
+  "engine_commit": "43885775fc3e92e59aee69e95604f28e7ebeb075",
+  "prompt": "remove the earphones"
+}

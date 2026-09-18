@@ -420,3 +420,63 @@ void hd_image_keep_aspect(const hd_image *ref, int req_w, int req_h,
     *out_h = resized.height;
     hd_image_free(&resized);
 }
+hd_status hd_image_to_vlm_patches(const hd_image *img, int patch_size,
+                                  int temporal_patch_size, int merge_size,
+                                  float *out) {
+    if (!img || !img->rgb || !out || patch_size <= 0 ||
+        temporal_patch_size <= 0 || merge_size <= 0) {
+        hd_set_error("hd_image: to_vlm_patches bad args");
+        return HD_ERR_MISSING;
+    }
+    if (img->width % patch_size || img->height % patch_size) {
+        hd_set_error("hd_image: vlm dims not patch-aligned");
+        return HD_ERR_MISSING;
+    }
+    int gh = img->height / patch_size;
+    int gw = img->width / patch_size;
+    if (gh % merge_size || gw % merge_size) {
+        hd_set_error("hd_image: vlm grid not merge-aligned");
+        return HD_ERR_MISSING;
+    }
+    int t = temporal_patch_size;
+    int m = merge_size;
+    int p = patch_size;
+    int C = 3;
+    int mh = gh / m, mw = gw / m;
+    int n = mh * mw * m * m;   /* grid_t=1 */
+    int token_dim = C * t * p * p;
+
+    /* Processor patchify (grid_t=1):
+     *   patches = reshape(1, t, C, mh, m, mw, m, p, p)
+     *             .transpose(0,3,6,4,7,2,1,5,8)
+     *             .flatten -> [n, C*t*p*p]
+     * Token (bh, bw, mh_i, mw_i) -> image patch at
+     *   row = bh*m + mh_i, col = bw*m + mw_i
+     * Within a token: index = c*(t*p*p) + tt*(p*p) + p1*p + p2
+     *   value = img[row*p + p1, col*p + p2, c]  (temporal repeats) */
+    for (int bh = 0; bh < mh; bh++) {
+        for (int bw = 0; bw < mw; bw++) {
+            for (int mh_i = 0; mh_i < m; mh_i++) {
+                for (int mw_i = 0; mw_i < m; mw_i++) {
+                    int tok = ((bh * mw + bw) * m + mh_i) * m + mw_i;
+                    float *dst = out + (size_t)tok * token_dim;
+                    int row0 = (bh * m + mh_i) * p;
+                    int col0 = (bw * m + mw_i) * p;
+                    for (int c = 0; c < C; c++) {
+                        for (int tt = 0; tt < t; tt++) {
+                            for (int p1 = 0; p1 < p; p1++) {
+                                for (int p2 = 0; p2 < p; p2++) {
+                                    int sy = row0 + p1, sx = col0 + p2;
+                                    float v = img->rgb[((size_t)sy * img->width + sx) * 3 + c];
+                                    int idx = c * (t * p * p) + tt * (p * p) + p1 * p + p2;
+                                    dst[idx] = v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return HD_OK;
+}

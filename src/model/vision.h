@@ -50,6 +50,28 @@
 #define HD_VISION_NUM_DS       3      /* deepstack mergers */
 #define HD_VISION_DS_LAYERS    {8, 16, 24}
 
+/* Block-0 debug snapshot slots (captured DURING the forward, since the
+ * workspace scratch buffers are reused by all 27 blocks). */
+enum {
+    HD_B0_INPUT = 0,   /* cur_in before norm1 */
+    HD_B0_NORM1,       /* ln1 */
+    HD_B0_QKV,         /* qkv */
+    HD_B0_Q,           /* q (head-major) */
+    HD_B0_K,           /* k (head-major) */
+    HD_B0_V,           /* v (head-major) */
+    HD_B0_Q_ROT,       /* qr */
+    HD_B0_K_ROT,       /* kr */
+    HD_B0_ATTN_HEADS,  /* head-major attention output (qkv temp) */
+    HD_B0_ATTN_MERGED, /* attn_out (seq-major) */
+    HD_B0_PROJ,        /* attn_resid before residual */
+    HD_B0_ATTN_RESID,  /* attn_resid after residual */
+    HD_B0_NORM2,       /* ln2 */
+    HD_B0_FC1,         /* fc1 */
+    HD_B0_FC2,         /* fc2 */
+    HD_B0_OUTPUT,      /* mlp_resid */
+    HD_B0_SNAP_COUNT
+};
+
 /* One vision transformer block's weights (Qwen3VLVisionBlock). */
 typedef struct {
     const void *norm1_w;   /* [1152] bf16 LayerNorm weight */
@@ -125,7 +147,26 @@ typedef struct {
     /* cuDNN SDPA plan for the vision attention (created once by the caller
      * for the fixed n x n shape; NULL keeps the eager reference backend). */
     hd_sdpa_plan *sdpa;
+    /* Optional debug snapshot: if non-NULL, block 0 output (mlp_resid after
+     * the first block) is copied here for oracle comparison. */
+    void *block0_snap;
+    /* Optional debug snapshots of block-0 internal stages, captured DURING
+     * the forward (the workspace buffers are reused by later blocks).
+     * Each entry is a dedicated device buffer owned by the caller; NULL
+     * entries are skipped. */
+    void *block0_snaps[HD_B0_SNAP_COUNT];
 } hd_vision_workspace;
+
+/* Workspace region offsets (bytes) for a given token count. Exposed for
+ * tests that need to read intermediate buffers back from the workspace. */
+typedef struct {
+    int64_t patch_out, pos_emb, rot, h_a, h_b, ln1, attn_resid, ln2, fc2,
+            mlp_resid, q, k, v, qr, kr, qkv, scores, probs, attn_out, fc1,
+            cosf, sinf, merged, merge_norm, merge_fc1, merge_fc2, ds_merged,
+            ds_fc1, ds_fc2, total_bytes;
+} hd_vision_offsets;
+
+void hd_vision_layout(int64_t n, int64_t m, hd_vision_offsets *o);
 
 /*
  * Resolve ALL vision tower weights from the device store into `out` exactly

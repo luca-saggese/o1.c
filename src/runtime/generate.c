@@ -523,6 +523,18 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         /* target rows: out_dev[text_len : text_len+IMG] */
         cudaMemcpy(xp_dev, (const char *)out_dev + (size_t)text_len * FF * 2,
                    nimg * 2, cudaMemcpyDeviceToDevice);
+#ifdef O1_DEBUG_TIMING
+        {
+            uint16_t h[4];
+            cudaMemcpy(h, xp_dev, 8, cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[ref-dbg] xp[0..3]=%04x %04x %04x %04x\n",
+                    h[0], h[1], h[2], h[3]);
+            uint16_t zz[4];
+            cudaMemcpy(zz, z_prev_dev, 8, cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[ref-dbg] z[0..3]=%04x %04x %04x %04x\n",
+                    zz[0], zz[1], zz[2], zz[3]);
+        }
+#endif
 
         hd_sched_vcond(z_prev_dev, xp_dev, sigma, mo_dev, (int)nimg);
 
@@ -578,6 +590,17 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     cudaMemcpy(z_bf16_h, z_prev_dev, nimg * 2, cudaMemcpyDeviceToHost);
     hd_bf16_buf_to_f32(z_bf16_h, z_final, nimg);
     free(z_bf16_h);
+#ifdef O1_DEBUG_TIMING
+    {
+        float mn = z_final[0], mx = z_final[0];
+        for (size_t i = 1; i < nimg; i++) {
+            if (z_final[i] < mn) mn = z_final[i];
+            if (z_final[i] > mx) mx = z_final[i];
+        }
+        fprintf(stderr, "[ref-dbg] z_final[0..3]=%g %g %g %g range=[%g,%g]\n",
+                z_final[0], z_final[1], z_final[2], z_final[3], mn, mx);
+    }
+#endif
     int bad = 0;
     for (size_t i = 0; i < nimg; i++) {
         if (isnan(z_final[i]) || isinf(z_final[i])) { bad = 1; break; }

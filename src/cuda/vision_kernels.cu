@@ -7,6 +7,7 @@
  */
 
 #include "cuda_internal.h"
+#include "vision_kernels.h"
 
 #include <stdio.h>
 
@@ -35,8 +36,11 @@ void hd_vision_patch(const void *x, const void *w, const void *bias,
         snprintf(hd_cuda_errbuf(), 512, "vision_patch: bad args");
         return;
     }
-    dim3 blk(32, 32);
-    dim3 grd((n + 31) / 32, (out_dim + 31) / 32);
+    /* row = blockIdx.x (one block per input row), col = blockIdx.y*blockDim.x
+     * + threadIdx.x. Grid must cover ALL n rows. */
+    int threads = 256;
+    dim3 blk(threads);
+    dim3 grd(n, (out_dim + threads - 1) / threads);
     hd_vision_patch_kernel<<<grd, blk>>>(
         (const uint16_t *)x, (const uint16_t *)w, (const uint16_t *)bias,
         (uint16_t *)y, n, in_dim, out_dim);
@@ -217,13 +221,13 @@ void hd_vision_rot_cos_sin(const void *rot, float *cosd, float *sind,
 __global__ void hd_vision_spatial_merge_kernel(
         const uint16_t *__restrict__ in, uint16_t *__restrict__ out,
         int gh, int gw, int hidden) {
-    int oh = blockIdx.x;
-    int ow = blockIdx.y;
-    if (oh >= gh / 2 || ow >= gw / 2) return;
+    int out_row = blockIdx.x;
+    int mw = gw / 2;
+    int oh = out_row / mw;
+    int ow = out_row % mw;
     int t = threadIdx.x;
     int nt = blockDim.x;
     int m = 2;
-    int out_row = oh * (gw / 2) + ow;
     uint16_t *orow = out + (size_t)out_row * (hidden * m * m);
     for (int c = t; c < hidden; c += nt) {
         for (int dh = 0; dh < m; dh++) {
@@ -243,9 +247,9 @@ void hd_vision_spatial_merge(const void *in, void *out, int gh, int gw,
         snprintf(hd_cuda_errbuf(), 512, "vision_spatial_merge: bad args");
         return;
     }
-    dim3 blk(32, 32);
-    dim3 grd((gh / 2 + 31) / 32, (gw / 2 + 31) / 32);
-    hd_vision_spatial_merge_kernel<<<grd, blk>>>(
+    /* one block per merged output row: out_n = (gh/2)*(gw/2) */
+    int out_n = (gh / 2) * (gw / 2);
+    hd_vision_spatial_merge_kernel<<<out_n, 256>>>(
         (const uint16_t *)in, (uint16_t *)out, gh, gw, hidden);
 }
 

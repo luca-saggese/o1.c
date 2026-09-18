@@ -57,6 +57,10 @@ TEST_FF_BIN := build/test_full_forward
 TEST_FF_SRCS := tests/unit/test_full_forward.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_FF_OBJS := $(TEST_FF_SRCS:.c=.o)
 
+TEST_VISION_BIN := build/test_vision
+TEST_VISION_SRCS := tests/unit/test_vision.c src/model/vision.c $(CORE_SRCS) src/model/weights.c
+TEST_VISION_OBJS := $(TEST_VISION_SRCS:.c=.o)
+
 TEST_GEMM_BIN := build/test_gemm_smoke
 TEST_GEMM_SRCS := tests/unit/test_gemm_smoke.c
 TEST_GEMM_OBJS := $(TEST_GEMM_SRCS:.c=.o)
@@ -329,6 +333,13 @@ bench-block: $(BENCH_BLOCK_BIN)
 $(TEST_FF_BIN): $(TEST_FF_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_FF_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+$(TEST_VISION_BIN): $(TEST_VISION_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_VISION_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+test-vision: $(TEST_VISION_BIN)
+	./$(TEST_VISION_BIN)
 
 $(TEST_GEMM_BIN): $(TEST_GEMM_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)

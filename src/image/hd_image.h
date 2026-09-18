@@ -74,6 +74,25 @@ hd_status hd_image_to_patches(const hd_image *img, int patch_size,
 void hd_image_keep_aspect(const hd_image *ref, int req_w, int req_h,
                           int patch_size, int *out_w, int *out_h);
 
+/*
+ * Qwen2VLImageProcessor patchify parity for the VLM vision tower input.
+ * Produces pixel_values [n, C*t*p*p] bf16-ready floats from a normalized
+ * [-1,1] RGB image, matching the processor's patchify:
+ *
+ *   patches = reshape(grid_t, t, C, gh//m, m, p, gw//m, m, p)
+ *             .transpose(0,3,6,4,7,2,1,5,8).flatten
+ *
+ * with grid_t=1, t=temporal_patch_size, m=merge_size, p=patch_size.
+ * Token order: (bh, bw, m_h, m_w); within a token:
+ *   index = c*(t*p*p) + tt*(p*p) + p1*p + p2.
+ * img must be [0,1] float32 RGB (hd_image layout); the caller normalizes
+ * to [-1,1] (the processor does rescale 1/255 + normalize mean/std 0.5).
+ * out must hold n * C*t*p*p floats.
+ */
+hd_status hd_image_to_vlm_patches(const hd_image *img, int patch_size,
+                                  int temporal_patch_size, int merge_size,
+                                  float *out);
+
 void hd_image_free(hd_image *img);
 
 #ifdef __cplusplus
