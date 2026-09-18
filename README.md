@@ -235,18 +235,23 @@ The repository includes sample inputs and generated outputs under
 [`example_assets/`](example_assets/). Run the commands below from the
 repository root after building `build/hidream`.
 
-| Feature | Mode/options | Input assets | Example output |
-|---------|--------------|--------------|----------------|
-| Text-to-image | `--mode t2i` | prompt only | [`generated/t2i_dev.png`](example_assets/generated/t2i_dev.png) |
-| Instruction-based editing | `--mode edit` | [`edit/test.jpg`](example_assets/edit/test.jpg) | [`generated/edit.png`](example_assets/generated/edit.png) |
-| Multi-reference personalization | `--mode personalize` | [`IP/1.jpg` … `IP/10.jpg`](example_assets/IP/) | [`generated/personalize.png`](example_assets/generated/personalize.png) |
-| Skeleton-guided composition | `--mode personalize` with face, background, pose and part references | [`IP_skeleton/`](example_assets/IP_skeleton/) | [`generated/skeleton.png`](example_assets/generated/skeleton.png) |
-| Personalization with layout | `--mode layout --layout-bboxes` | [`IP_layout/0.jpg`](example_assets/IP_layout/0.jpg), [`IP_layout/1.jpg`](example_assets/IP_layout/1.jpg) | [`generated/layout.png`](example_assets/generated/layout.png) |
-| Preserve source aspect ratio | `--keep-original-aspect` | [`edit/test.jpg`](example_assets/edit/test.jpg) | [`generated/edit_keep_aspect.png`](example_assets/generated/edit_keep_aspect.png) |
+| Feature | Mode/options | Input assets | Verified output |
+|---------|--------------|--------------|-----------------|
+| Text-to-image | `--mode t2i` | prompt only | — |
+| Instruction-based editing | `--mode edit` | [`edit/test.jpg`](example_assets/edit/test.jpg) | [`edit/generated.png`](example_assets/edit/generated.png) |
+| Multi-reference personalization | `--mode personalize` | [`IP/1.jpg` … `IP/10.jpg`](example_assets/IP/) | — |
+| Skeleton-guided composition | `--mode personalize` with face, background, pose and part references | [`IP_skeleton/`](example_assets/IP_skeleton/) | — |
+| Personalization with layout | `--mode layout --layout-bboxes` | [`IP_layout/0.jpg`](example_assets/IP_layout/0.jpg), [`IP_layout/1.jpg`](example_assets/IP_layout/1.jpg) | — |
+| Preserve source aspect ratio | `--keep-original-aspect` | [`edit/test.jpg`](example_assets/edit/test.jpg) | — |
 
 The examples use the materialized Dev GGUF at
 `artifacts/models/hidream-o1-dev-bf16.gguf`. Omit `--model-dir` to use the
 path configured by the selected profile.
+
+> **Use the full Dev schedule for image-quality examples.** `--steps 1` is
+> useful only as an execution smoke test; its decoded image may be uniform
+> mid-gray and must not be treated as a generated result. The commands below
+> therefore use the Dev default of 28 steps.
 
 ### Text-to-image (Dev)
 
@@ -255,7 +260,7 @@ path configured by the selected profile.
   --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
   --prompt "A dog holds a sign that says HiDream-O1-Image release." \
   --width 1024 --height 1024 --steps 28 --seed 42 \
-  --output example_assets/generated/t2i_dev.png
+  --output t2i-dev-output.png
 ```
 
 ### Text-to-image (Base + FlowUniPC/CFG)
@@ -266,7 +271,7 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
 ./build/hidream --model base \
   --prompt "A cinematic portrait in soft natural light." \
   --width 1024 --height 1024 --steps 50 --seed 42 \
-  --output example_assets/generated/t2i_base.png
+  --output t2i-base-output.png
 ```
 
 ### Instruction-based editing
@@ -277,8 +282,8 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
   --mode edit \
   --ref-image example_assets/edit/test.jpg \
   --prompt "remove the earphones" \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/edit.png
+  --width 1024 --height 1024 --steps 28 --seed 123456 \
+  --output edit-output.png
 ```
 
 ### Multi-reference personalization
@@ -298,8 +303,8 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
   --ref-image example_assets/IP/9.jpg \
   --ref-image example_assets/IP/10.jpg \
   --prompt "Create a coherent portrait using the supplied subject references." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/personalize.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output personalize-output.png
 ```
 
 References may also be named and used in the prompt with the
@@ -321,8 +326,8 @@ images as an ordered multi-reference personalization request:
   --ref-image example_assets/IP_skeleton/0.part_2.jpg \
   --ref-image example_assets/IP_skeleton/0.part_3.jpg \
   --prompt "Create a realistic try-on image of the person wearing the provided clothing." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/skeleton.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output skeleton-output.png
 ```
 
 ### Personalization with layout
@@ -338,8 +343,8 @@ follow the same order as the reference images:
   --ref-image object=example_assets/IP_layout/1.jpg \
   --layout-bboxes "[[0.20507812,0.43945312,0.48828125,0.7421875],[0.57617188,0.80078125,0.08789062,0.34179688]]" \
   --prompt "@person and @object arranged according to the supplied layout." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/layout.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output layout-output.png
 ```
 
 ### Preserve the original aspect ratio
@@ -354,8 +359,8 @@ dimensions from the source image:
   --ref-image example_assets/edit/test.jpg \
   --keep-original-aspect \
   --prompt "remove the earphones" \
-  --steps 1 --seed 42 \
-  --output example_assets/generated/edit_keep_aspect.png
+  --steps 28 --seed 42 \
+  --output edit-keep-aspect-output.png
 ```
 
 See [`example_assets/README.md`](example_assets/README.md) for attribution,

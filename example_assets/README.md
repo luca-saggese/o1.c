@@ -25,11 +25,9 @@ All examples use the native binary `./build/hidream` with the materialized
 GGUF weight pack. They mirror the upstream README examples (same assets and
 prompts where sensible) but use only native `o1.c` flags.
 
-> **Note on steps**: the engine currently has a pre-existing multi-step
-> ("double free or corruption") bug that is unrelated to these modes. The
-> examples below use `--steps 1` as the verified end-to-end path. The
-> upstream defaults (28 steps dev / 50 steps base) are documented but not
-> yet runnable end-to-end.
+> **Note on steps**: use the complete Dev schedule (`--steps 28`) for a
+> meaningful image. A one-step run is only an execution smoke test and may
+> decode to uniform mid-gray; it is not a generation-quality result.
 
 ### Text-to-Image
 
@@ -37,11 +35,9 @@ prompts where sensible) but use only native `o1.c` flags.
 ./build/hidream --model dev \
   --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
   --prompt "A dog holds a sign that says HiDream-O1-Image release." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/t2i_dev.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output t2i-dev-output.png
 ```
-
-![t2i_dev](generated/t2i_dev.png)
 
 ### Instruction-Based Image Editing
 
@@ -51,11 +47,13 @@ prompts where sensible) but use only native `o1.c` flags.
   --mode edit \
   --ref-image example_assets/edit/test.jpg \
   --prompt "remove the earphones" \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/edit.png
+  --width 1024 --height 1024 --steps 28 --seed 123456 \
+  --output edit-output.png
 ```
 
-![edit](generated/edit.png)
+Verified 28-step output:
+
+![edit](edit/generated.png)
 
 ### Multi-Reference Subject-Driven Personalization
 
@@ -67,13 +65,11 @@ prompts where sensible) but use only native `o1.c` flags.
   --ref-image example_assets/IP/3.jpg --ref-image example_assets/IP/4.jpg \
   --ref-image example_assets/IP/5.jpg --ref-image example_assets/IP/6.jpg \
   --ref-image example_assets/IP/7.jpg --ref-image example_assets/IP/8.jpg \
-  --ref-image example_assets/IP/9.jpg --ref-image example_assets/IP/10.jpg \
+  --ref-image example_assets/IP/9.jpg   --ref-image example_assets/IP/10.jpg \
   --prompt "A young boy with blonde hair stands on steps wearing light blue jeans, a white t-shirt with logo, and blue and white sneakers. He wears a brown cord necklace with beads, a black wristwatch with digital display, and carries a yellow fanny pack with white zipper. In his hand is a red boxing glove with white top, a teal plastic toy car, and a plastic toy figure of Captain America. He wears a straw hat with cream band. Natural light illuminates the scene." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/personalize.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output personalize-output.png
 ```
-
-![personalize](generated/personalize.png)
 
 ### Multi-Reference Personalization + Skeleton
 
@@ -92,11 +88,9 @@ path. The native engine follows the same semantics.
   --ref-image example_assets/IP_skeleton/0.part_2.jpg \
   --ref-image example_assets/IP_skeleton/0.part_3.jpg \
   --prompt "Create a realistic try-on image of the person wearing the provided clothing." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/skeleton.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output skeleton-output.png
 ```
-
-![skeleton](generated/skeleton.png)
 
 ### Multi-Reference Personalization + Layout
 
@@ -108,11 +102,9 @@ path. The native engine follows the same semantics.
   --ref-image example_assets/IP_layout/1.jpg \
   --layout-bboxes "[[0.20507812, 0.43945312, 0.48828125, 0.7421875], [0.57617188, 0.80078125, 0.08789062, 0.34179688]]" \
   --prompt "City council members pose with relaxed smiles on a sunlit terrace, warm approachable mood, golden hour, cinematic soft glow." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/layout.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output layout-output.png
 ```
-
-![layout](generated/layout.png)
 
 ### keep-original-aspect (single-reference editing)
 
@@ -127,11 +119,9 @@ instead of the requested `--width`/`--height`.
   --ref-image example_assets/edit/test.jpg \
   --keep-original-aspect \
   --prompt "remove the earphones" \
-  --steps 1 --seed 42 \
-  --output example_assets/generated/edit_keep_aspect.png
+  --steps 28 --seed 42 \
+  --output edit-keep-aspect-output.png
 ```
-
-![edit_keep_aspect](generated/edit_keep_aspect.png)
 
 ### Dev model / scheduler variants
 
@@ -147,18 +137,12 @@ flash scheduler.
   --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
   --scheduler flash \
   --prompt "A dog holds a sign that says HiDream-O1-Image release." \
-  --width 1024 --height 1024 --steps 1 --seed 42 \
-  --output example_assets/generated/t2i_dev.png
+  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --output t2i-dev-output.png
 ```
 
 ## Known limitations
 
-- **Multi-step generation** crashes with a pre-existing engine bug
-  ("double free or corruption") that reproduces on a clean checkout without
-  any of these modes. All examples use `--steps 1` as the verified path.
-- **Base model** (`--model base`) has the same multi-step crash and is
-  additionally affected by an intermittent 1-step crash; the Dev model is
-  the reliable production path.
 - **`flow_match` scheduler** is declared but not wired; editing uses flash.
 - **Layout** currently passes the bboxes as conditioning metadata; the
   upstream `create_layout_reference_images` composition is not yet

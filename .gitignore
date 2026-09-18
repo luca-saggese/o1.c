@@ -26,6 +26,7 @@
 *.log
 *.tmp
 *.bin
+/example_assets/generated/
 
 # --- Python ---
 __pycache__/
