@@ -450,7 +450,7 @@ int main(void) {
                cudaMemcpyHostToDevice);
 
     st = hd_forward(&bw, &ws, idsd, T, (const float *)posd, maskd, z_prev_dev, IMG,
-                   tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL, out_dev, NULL);
+                   NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL, out_dev, NULL);
     CHECK(st == HD_OK, "hd_forward step0 ran without error");
     if (st != HD_OK) return 1;
     cudaDeviceSynchronize();
@@ -498,7 +498,7 @@ int main(void) {
         cudaMemcpy(noise_dev, (const char *)golden + gno->offset, nimg * 4,
                    cudaMemcpyHostToDevice);
         st = hd_forward(&bw, &ws, idsd, T, (const float *)posd, maskd, z_prev_dev,
-                       IMG, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL,
+                       IMG, NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL,
                        out_dev, NULL);
         if (st != HD_OK) { c_ok = 0; break; }
         cudaMemcpy(xp_dev, (const char *)out_dev + (size_t)19 * FF * 2, 24576,

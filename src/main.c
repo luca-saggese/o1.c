@@ -11,6 +11,83 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+/* ------------------------------------------------------------------ */
+/* Progress bar                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Minimal in-place progress bar for the denoise + transformer-layer
+ * pipeline. Prints "step i/N | layer j/L" on one line and refreshes with a
+ * carriage return; disabled when stderr is not a TTY or --no-progress is
+ * given. It is a pure frontend: it never touches device state.
+ */
+typedef struct {
+    int steps;         /* total denoise steps */
+    int layers;        /* total decoder layers */
+    int cur_step;      /* 1-based current step */
+    int cur_layer;     /* current layer within the step */
+    int enabled;
+    int last_len;      /* length of the last printed line */
+} progress_state;
+
+static void progress_render(progress_state *p) {
+    if (!p->enabled) return;
+    int width = 0;
+    struct winsize wsz;
+    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &wsz) == 0 && wsz.ws_col > 0)
+        width = wsz.ws_col;
+    else
+        width = 80;
+
+    /* overall fraction across steps*layers */
+    long total = (long)p->steps * p->layers;
+    long done = (long)(p->cur_step - 1) * p->layers + p->cur_layer;
+    if (total <= 0) total = 1;
+    double frac = (double)done / (double)total;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+
+    char tail[64];
+    int tn = snprintf(tail, sizeof(tail), " step %d/%d layer %d/%d",
+                      p->cur_step, p->steps, p->cur_layer, p->layers);
+    int bar_w = width - tn - 8; /* "[...] NN%" */
+    if (bar_w < 10) bar_w = 10;
+    if (bar_w > 60) bar_w = 60;
+
+    char line[256];
+    int off = snprintf(line, sizeof(line), "\r[");
+    int filled = (int)(frac * bar_w + 0.5);
+    for (int i = 0; i < bar_w; i++) {
+        if (off < (int)sizeof(line) - 1)
+            line[off++] = (i < filled) ? '#' : '-';
+    }
+    off += snprintf(line + off, sizeof(line) - (size_t)off, "] %3d%%%s",
+                    (int)(frac * 100.0 + 0.5), tail);
+    /* pad to clear the previous longer line */
+    while (off < p->last_len && off < (int)sizeof(line) - 1) line[off++] = ' ';
+    line[off] = '\0';
+    fputs(line, stderr);
+    fflush(stderr);
+    p->last_len = off;
+}
+
+static void progress_step_cb(int step, int total, void *user) {
+    progress_state *p = (progress_state *)user;
+    p->cur_step = step;
+    p->steps = total;
+    p->cur_layer = 0;
+    progress_render(p);
+}
+
+static void progress_layer_cb(int layer, int total, void *user) {
+    progress_state *p = (progress_state *)user;
+    p->cur_layer = layer;
+    p->layers = total;
+    progress_render(p);
+}
 
 static void usage(const char *argv0) {
     printf("usage: %s [options]\n", argv0);
@@ -22,6 +99,7 @@ static void usage(const char *argv0) {
     printf("  --ref-image PATH        reference image (repeatable, edit/personalize)\n");
     printf("  --ref-image NAME=PATH   named reference; use @NAME in --prompt\n");
     printf("  --verbose               print reference alias mapping / expanded prompt\n");
+    printf("  --no-progress           disable the generation progress bar\n");
     printf("  --width N               output width (default: 1024)\n");
     printf("  --height N              output height (default: 1024)\n");
     printf("  --steps N               inference steps (default per profile)\n");
@@ -122,6 +200,7 @@ int main(int argc, char **argv) {
     int ref_count = 0;
     char ref_aliases[10][128];
     int verbose = 0;
+    int no_progress = 0;
     int keep_original_aspect = 0;
     const char *layout_bboxes = NULL;
 
@@ -210,6 +289,8 @@ int main(int argc, char **argv) {
             ref_count++;
         } else if (strcmp(argv[i], "--verbose") == 0) {
             verbose = 1;
+        } else if (strcmp(argv[i], "--no-progress") == 0) {
+            no_progress = 1;
         } else if (strcmp(argv[i], "--keep-original-aspect") == 0) {
             keep_original_aspect = 1;
         } else if (strcmp(argv[i], "--layout-bboxes") == 0 && i + 1 < argc) {
@@ -249,6 +330,20 @@ int main(int argc, char **argv) {
         req.noise_scale_end = noise_end;
         req.noise_clip_std = noise_clip;
         req.progress_cb = NULL;
+        req.layer_progress_cb = NULL;
+        req.layer_progress_user = NULL;
+        /* In-place progress bar (stderr, TTY only unless --no-progress). */
+        progress_state prog;
+        memset(&prog, 0, sizeof(prog));
+        prog.steps = req.steps > 0 ? req.steps : 1;
+        prog.layers = 1;
+        prog.enabled = !no_progress && isatty(STDERR_FILENO);
+        if (prog.enabled) {
+            req.progress_cb = progress_step_cb;
+            req.progress_user = &prog;
+            req.layer_progress_cb = progress_layer_cb;
+            req.layer_progress_user = &prog;
+        }
         req.references = ref_count > 0 ? refs : NULL;
         req.reference_count = (size_t)ref_count;
         req.keep_original_aspect = keep_original_aspect;
@@ -305,6 +400,13 @@ int main(int argc, char **argv) {
         int ow = 0, oh = 0;
         st = hd_generate(&req, dir, device_id, &rgb, &ow, &oh);
         O1_TIMING_END("REQUEST_TOTAL");
+        if (prog.enabled) {
+            /* Finish the bar at 100% and move off the progress line. */
+            prog.cur_step = prog.steps;
+            prog.cur_layer = prog.layers;
+            progress_render(&prog);
+            fputc('\n', stderr);
+        }
         if (st != HD_OK) {
             fprintf(stderr, "FAIL: generation: %s\n", hd_last_error());
             hd_profile_free(&p);

@@ -694,6 +694,8 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     memset(&ws, 0, sizeof(ws));
     ws.hidden_a = wsbase;
     ws.block_scratch_bytes = scratch_bytes;
+    ws.layer_cb = req->layer_progress_cb;
+    ws.layer_user = req->layer_progress_user;
 
     /* cuDNN SDPA plan for the full sequence */
     {
@@ -1162,6 +1164,8 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     memset(&ws, 0, sizeof(ws));
     ws.hidden_a = wsbase;
     ws.block_scratch_bytes = scratch_bytes;
+    ws.layer_cb = req->layer_progress_cb;
+    ws.layer_user = req->layer_progress_user;
 
     hd_forward_workspace ws_uncond;
     memset(&ws_uncond, 0, sizeof(ws_uncond));

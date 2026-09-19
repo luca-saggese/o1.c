@@ -226,7 +226,7 @@ int main(void) {
     ws.block_scratch_bytes = scratch_bytes;
     double t0 = now_s();
     st = hd_forward(&bw, &ws, idsd, T, (const float *)posd, maskd,
-                    vind, IMG, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
+                    vind, IMG, NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
                     NULL, out_eager, NULL);
     cudaDeviceSynchronize();
     double t_eager = now_s() - t0;
@@ -248,7 +248,7 @@ int main(void) {
         ws.sdpa = plan;
         t0 = now_s();
         st = hd_forward(&bw, &ws, idsd, T, (const float *)posd, maskd,
-                        vind, IMG, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
+                        vind, IMG, NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
                         NULL, out_sdpa, NULL);
         cudaDeviceSynchronize();
         double t_sdpa = now_s() - t0;

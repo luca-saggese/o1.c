@@ -355,6 +355,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
             cur_out = (void *)cur_in;
             cur_in = tmp;
         }
+        if (ws->layer_cb) ws->layer_cb(i + 1, n, ws->layer_user);
     }
     /* After swapping following the final write, cur_in holds the last block
      * output. final_hidden = cur_in. */

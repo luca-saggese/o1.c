@@ -496,7 +496,7 @@ int main(void) {
         cudaMemcpy(noise_dev, (const char *)golden + gno->offset, nimg * 4,
                    cudaMemcpyHostToDevice);
         st = hd_forward(&bw, &ws, idsd, T, (const float *)posd, maskd,
-                        z_prev_dev, IMG, tsd, secd, S, NH, NKV, H, I, HD,
+                        z_prev_dev, IMG, NULL, tsd, secd, S, NH, NKV, H, I, HD,
                         TMS_ID, NULL, out_dev, NULL);
         if (st != HD_OK) { printf("FAIL: hd_forward step%d: %s\n",
                                   i, hd_last_error()); chain_ok = 0; break; }
