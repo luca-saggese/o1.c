@@ -83,13 +83,6 @@ typedef struct {
 
 typedef void (*hd_progress_callback)(int step, int total, void *user);
 
-/*
- * Optional per-layer progress hook for the transformer forward. Invoked once
- * after each decoder layer with `layer` in [1, total]. Purely informational;
- * must not allocate or synchronize. NULL disables.
- */
-typedef void (*hd_layer_progress_callback)(int layer, int total, void *user);
-
 /* ------------------------------------------------------------------ */
 /* Unified request                                                     */
 /* ------------------------------------------------------------------ */
@@ -122,10 +115,6 @@ typedef struct {
 
     hd_progress_callback progress_cb;
     void *progress_user;
-
-    /* Optional per-layer progress (see hd_layer_progress_callback). */
-    hd_layer_progress_callback layer_progress_cb;
-    void *layer_progress_user;
 
     const hd_lora_config *lora;   /* may be NULL; applied after weight load */
 } hd_generation_request;

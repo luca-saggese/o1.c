@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "hidream.h"
 #include "generate.h"
 #include "json.h"
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ------------------------------------------------------------------ */
@@ -19,19 +21,37 @@
 /* ------------------------------------------------------------------ */
 
 /*
- * Minimal in-place progress bar for the denoise + transformer-layer
- * pipeline. Prints "step i/N | layer j/L" on one line and refreshes with a
- * carriage return; disabled when stderr is not a TTY or --no-progress is
- * given. It is a pure frontend: it never touches device state.
+ * Minimal in-place progress bar for the denoise pipeline. Prints
+ * "step i/N" plus elapsed and estimated remaining time on one line and
+ * refreshes with a carriage return; disabled when stderr is not a TTY or
+ * --no-progress is given. It is a pure frontend: it never touches device
+ * state.
  */
 typedef struct {
     int steps;         /* total denoise steps */
-    int layers;        /* total decoder layers */
     int cur_step;      /* 1-based current step */
-    int cur_layer;     /* current layer within the step */
     int enabled;
+    int started;       /* clock started */
     int last_len;      /* length of the last printed line */
+    struct timespec t0;
 } progress_state;
+
+static double progress_now(const progress_state *p) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)(t.tv_sec - p->t0.tv_sec) +
+           (double)(t.tv_nsec - p->t0.tv_nsec) / 1e9;
+}
+
+/* mm:ss (or h:mm:ss past an hour) */
+static void progress_fmt_time(double secs, char *out, size_t n) {
+    if (secs < 0.0) secs = 0.0;
+    int s = (int)(secs + 0.5);
+    if (s >= 3600)
+        snprintf(out, n, "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60);
+    else
+        snprintf(out, n, "%02d:%02d", s / 60, s % 60);
+}
 
 static void progress_render(progress_state *p) {
     if (!p->enabled) return;
@@ -42,17 +62,24 @@ static void progress_render(progress_state *p) {
     else
         width = 80;
 
-    /* overall fraction across steps*layers */
-    long total = (long)p->steps * p->layers;
-    long done = (long)(p->cur_step - 1) * p->layers + p->cur_layer;
-    if (total <= 0) total = 1;
+    long total = p->steps > 0 ? p->steps : 1;
+    long done = p->cur_step;
+    if (done < 0) done = 0;
+    if (done > total) done = total;
     double frac = (double)done / (double)total;
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
 
-    char tail[64];
-    int tn = snprintf(tail, sizeof(tail), " step %d/%d layer %d/%d",
-                      p->cur_step, p->steps, p->cur_layer, p->layers);
+    /* Elapsed is measured; remaining extrapolates from the overall rate. */
+    double elapsed = p->started ? progress_now(p) : 0.0;
+    double remaining = (frac > 0.0) ? elapsed * (1.0 - frac) / frac : 0.0;
+    char es[16], rs[16];
+    progress_fmt_time(elapsed, es, sizeof(es));
+    progress_fmt_time(remaining, rs, sizeof(rs));
+
+    char tail[96];
+    int tn = snprintf(tail, sizeof(tail), " step %d/%d  %s elapsed  %s left",
+                      p->cur_step, p->steps, es, rs);
     int bar_w = width - tn - 8; /* "[...] NN%" */
     if (bar_w < 10) bar_w = 10;
     if (bar_w > 60) bar_w = 60;
@@ -76,16 +103,13 @@ static void progress_render(progress_state *p) {
 
 static void progress_step_cb(int step, int total, void *user) {
     progress_state *p = (progress_state *)user;
+    if (!p->enabled) return;
+    if (!p->started) {
+        clock_gettime(CLOCK_MONOTONIC, &p->t0);
+        p->started = 1;
+    }
     p->cur_step = step;
     p->steps = total;
-    p->cur_layer = 0;
-    progress_render(p);
-}
-
-static void progress_layer_cb(int layer, int total, void *user) {
-    progress_state *p = (progress_state *)user;
-    p->cur_layer = layer;
-    p->layers = total;
     progress_render(p);
 }
 
@@ -330,19 +354,14 @@ int main(int argc, char **argv) {
         req.noise_scale_end = noise_end;
         req.noise_clip_std = noise_clip;
         req.progress_cb = NULL;
-        req.layer_progress_cb = NULL;
-        req.layer_progress_user = NULL;
         /* In-place progress bar (stderr, TTY only unless --no-progress). */
         progress_state prog;
         memset(&prog, 0, sizeof(prog));
         prog.steps = req.steps > 0 ? req.steps : 1;
-        prog.layers = 1;
         prog.enabled = !no_progress && isatty(STDERR_FILENO);
         if (prog.enabled) {
             req.progress_cb = progress_step_cb;
             req.progress_user = &prog;
-            req.layer_progress_cb = progress_layer_cb;
-            req.layer_progress_user = &prog;
         }
         req.references = ref_count > 0 ? refs : NULL;
         req.reference_count = (size_t)ref_count;
@@ -403,7 +422,6 @@ int main(int argc, char **argv) {
         if (prog.enabled) {
             /* Finish the bar at 100% and move off the progress line. */
             prog.cur_step = prog.steps;
-            prog.cur_layer = prog.layers;
             progress_render(&prog);
             fputc('\n', stderr);
         }

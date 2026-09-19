@@ -208,16 +208,6 @@ $(TEST_REFALIAS_BIN): $(TEST_REFALIAS_OBJS)
 test-ref-alias: $(TEST_REFALIAS_BIN)
 	./$(TEST_REFALIAS_BIN)
 
-TEST_LAYERPROG_BIN := build/test_layer_progress
-TEST_LAYERPROG_SRCS := tests/unit/test_layer_progress.c
-TEST_LAYERPROG_OBJS := $(TEST_LAYERPROG_SRCS:.c=.o)
-$(TEST_LAYERPROG_BIN): $(TEST_LAYERPROG_OBJS)
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -o $@ $(TEST_LAYERPROG_OBJS) -lm
-
-test-layer-progress: $(TEST_LAYERPROG_BIN)
-	./$(TEST_LAYERPROG_BIN)
-
 TEST_SEQDIAG_BIN := build/test_seq_diag
 TEST_SEQDIAG_SRCS := tests/unit/test_seq_diag.c src/runtime/sequence.c src/runtime/request.c src/model/tokenizer.c $(CORE_SRCS)
 TEST_SEQDIAG_OBJS := $(TEST_SEQDIAG_SRCS:.c=.o)

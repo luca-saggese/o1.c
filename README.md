@@ -232,21 +232,19 @@ Key points:
 
 ## Generation progress
 
-When `stderr` is a TTY, generation prints an in-place progress bar that
-covers both levels of the pipeline: the denoise step and, inside each step,
-the transformer decoder layer.
+When `stderr` is a TTY, generation prints an in-place progress bar for the
+denoise loop, with elapsed time and an estimate of the remaining time:
 
 ```text
-[########------------------]  32% step 9/28 layer 12/36
+[########------------------]  32% step 9/28  00:12 elapsed  00:25 left
 ```
 
-- The bar is purely frontend: it is driven by `hd_generation_request.progress_cb`
-  (per denoise step) and `.layer_progress_cb` (per decoder layer, invoked from
-  `hd_forward`). It never allocates, synchronizes or touches device state.
+- Progress is measured per denoise step, so the fraction is `step/total` and
+  the estimate extrapolates linearly from the average step duration.
+- The bar is purely frontend: it is driven by `hd_generation_request.progress_cb`.
+  It never allocates, synchronizes or touches device state.
 - It is disabled automatically when `stderr` is not a TTY (so logs and pipes
   stay clean) and can be turned off explicitly with `--no-progress`.
-- C API: set `layer_progress_cb`/`layer_progress_user` on the request to
-  receive per-layer callbacks; `NULL` disables them.
 
 ## Generation examples
 
@@ -396,7 +394,6 @@ additional context and the upstream prompts associated with these assets.
 | `test-layout` | layout conditioning sequence (bit-exact) |
 | `test-seq` / `test-seq-ref` | sequence builder parity vs M1.4 fixture / oracle ground truth |
 | `test-ref-alias` | named reference alias parser, table, expansion (frontend-only) |
-| `test-layer-progress` | per-layer progress callback contract (layer index, total, NULL no-op) |
 | `test-seq-diag` | sequence manifest diagnostics + workspace estimate |
 | `test-seq-profiles` | frozen per-mode sequence geometry (perf freeze §70) |
 | `test-decode` | output decode (unpatchify) |

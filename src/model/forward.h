@@ -59,13 +59,6 @@ typedef struct {
 } hd_forward_binding;
 
 /*
- * Optional per-layer progress hook. Called once after each decoder layer
- * completes, with `layer` in [1, n_layers]. Purely informational: the hook
- * must not allocate, synchronize or touch device state. NULL disables it.
- */
-typedef void (*hd_layer_progress_fn)(int layer, int total, void *user);
-
-/*
  * Persistent device workspace for one forward. Sized for `seq` total tokens
  * and a single fixed profile. Allocated once by the caller (hd_forward
  * workspace sizing helper) and reused across repeated forwards.
@@ -89,11 +82,6 @@ typedef struct {
      * caller (hd_generate) for the fixed shape; NULL keeps the eager
      * reference attention as the backend. */
     hd_sdpa_plan *sdpa;
-    /* Optional per-layer progress hook (see hd_layer_progress_fn). Called
-     * after each decoder layer with layer in [1, n_layers]. Must not
-     * allocate/synchronize. NULL disables. */
-    hd_layer_progress_fn layer_cb;
-    void *layer_user;
 } hd_forward_workspace;
 
 /* Optional diagnostics on the production path (same forward). */
