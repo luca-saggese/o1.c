@@ -10,7 +10,7 @@ on Python**.
 
 > **Status:** Milestones **M0, M1, M1.1, M1.2, and M1-post are COMPLETE** —
 > the production native T2I path is working end-to-end (28-step Dev
-> generation at 1024², PNG output, no Python at runtime). **M2 (performance /
+> generation at 2048², PNG output, no Python at runtime). **M2 (performance /
 > pre-baseline) is in progress**: cuDNN SDPA attention and a persistent cuBLAS
 > GEMM production backend are frozen, with the numerical discrepancy
 > documented in [`docs/M2_CUBLAS_FREEZE.md`](docs/M2_CUBLAS_FREEZE.md). See
@@ -136,7 +136,7 @@ Then point the engine at the pack with `--model-dir`:
     --prompt "a teapot" --steps 28 --seed 123456 --output out.png
 ```
 
-Measured on GB10 (Dev 1024², 28 steps, BF16):
+Measured on GB10 (Dev 2048², 28 steps, BF16):
 
 | Loader | FILE_READ | MODEL_LOAD | disk GB/s |
 |--------|-----------|------------|-----------|
@@ -162,8 +162,8 @@ build/hidream [options]
   --no-progress           disable the generation progress bar
   --keep-original-aspect  single ref: derive output dims from ref
   --layout-bboxes JSON    layout bboxes for personalize+layout
-  --width N               output width (default: 1024)
-  --height N              output height (default: 1024)
+  --width N               output width (default: 2048)
+  --height N              output height (default: 2048)
   --steps N               inference steps (default per profile)
   --seed N                RNG seed (default: 123456)
   --scheduler flash|default|flow_match   (default per profile)
@@ -276,7 +276,7 @@ path configured by the selected profile.
 ./build/hidream --model dev \
   --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
   --prompt "A dog holds a sign that says HiDream-O1-Image release." \
-  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --width 2048 --height 2048 --steps 28 --seed 42 \
   --output t2i-dev-output.png
 ```
 
@@ -287,7 +287,7 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
 ```sh
 ./build/hidream --model base \
   --prompt "A cinematic portrait in soft natural light." \
-  --width 1024 --height 1024 --steps 50 --seed 42 \
+  --width 2048 --height 2048 --steps 50 --seed 42 \
   --output t2i-base-output.png
 ```
 
@@ -299,7 +299,7 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
   --mode edit \
   --ref-image example_assets/edit/test.jpg \
   --prompt "remove the earphones" \
-  --width 1024 --height 1024 --steps 28 --seed 123456 \
+  --width 2048 --height 2048 --steps 28 --seed 123456 \
   --output edit-output.png
 ```
 
@@ -320,7 +320,7 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
   --ref-image example_assets/IP/9.jpg \
   --ref-image example_assets/IP/10.jpg \
   --prompt "Create a coherent portrait using the supplied subject references." \
-  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --width 2048 --height 2048 --steps 28 --seed 42 \
   --output personalize-output.png
 ```
 
@@ -343,7 +343,7 @@ images as an ordered multi-reference personalization request:
   --ref-image example_assets/IP_skeleton/0.part_2.jpg \
   --ref-image example_assets/IP_skeleton/0.part_3.jpg \
   --prompt "Create a realistic try-on image of the person wearing the provided clothing." \
-  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --width 2048 --height 2048 --steps 28 --seed 42 \
   --output skeleton-output.png
 ```
 
@@ -360,7 +360,7 @@ follow the same order as the reference images:
   --ref-image object=example_assets/IP_layout/1.jpg \
   --layout-bboxes "[[0.20507812,0.43945312,0.48828125,0.7421875],[0.57617188,0.80078125,0.08789062,0.34179688]]" \
   --prompt "@person and @object arranged according to the supplied layout." \
-  --width 1024 --height 1024 --steps 28 --seed 42 \
+  --width 2048 --height 2048 --steps 28 --seed 42 \
   --output layout-output.png
 ```
 
@@ -399,7 +399,7 @@ additional context and the upstream prompts associated with these assets.
 | `test-decode` | output decode (unpatchify) |
 | `test-refiner` | prompt refiner clients |
 | `test-progress` / `test-preview` | progress callback / preview extraction |
-| `test-sanity` | native 1024² runner (1-step decode + PNG) |
+| `test-sanity` | native 2048² runner (1-step decode + PNG) |
 | `test-m17` | M1.7 full-forward numerical gate (incl. `test-m17-base`) |
 | `test-tokenizer` | native tokenization (incl. long/multilingual text) |
 | `test-gemm-smoke` | deterministic cuBLAS GEMM mapping check |
@@ -443,7 +443,7 @@ Current state (see [`docs/M2_CUBLAS_FREEZE.md`](docs/M2_CUBLAS_FREEZE.md)):
 - **Pipelined weight loader** — one aligned CUDA arena, pinned staging,
   dedicated nonblocking upload stream; safetensors load drops from 30 s to
   27 s, and the materialized GGUF pack (see above) to ~5 s.
-- **Frozen performance** — native Dev 1024²/28-step generation ≈27 s vs
+- **Frozen performance** — native Dev 2048²/28-step generation ≈27 s vs
   ≈90 s Python legacy (≈3.3× speedup) and ≈25 min estimated for the old
   reference GEMM (≈50×+). A known numerical discrepancy (13/14 full-forward
   PASS on the cuBLAS path) is documented and accepted for the performance
