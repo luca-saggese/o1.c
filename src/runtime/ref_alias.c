@@ -92,7 +92,7 @@ int hd_ref_alias_build(hd_ref_alias_table *tbl,
     if (n_user < 0) n_user = 0;
     if (n_internal < 0) n_internal = 0;
     if (n_user + n_internal > HD_REF_ALIAS_MAX) {
-        set_err("too many references (max %s)", "16", NULL);
+        set_err("too many references (max %s)", "20", NULL);
         return HD_ERR_MISMATCH;
     }
 

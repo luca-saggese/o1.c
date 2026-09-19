@@ -156,7 +156,7 @@ build/hidream [options]
   --model dev|base        profile to use (default: dev)
   --prompt TEXT           user prompt
   --mode t2i|edit|personalize|...   generation mode (default: t2i)
-  --ref-image PATH        reference image (repeatable, max 10)
+  --ref-image PATH        reference image (repeatable, max 20)
   --ref-image NAME=PATH   named reference; refer to it as @NAME in --prompt
   --verbose               print the reference alias mapping + expanded prompt
   --no-progress           disable the generation progress bar

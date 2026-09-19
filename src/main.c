@@ -6,6 +6,7 @@
 #include "png_wrap.h"
 #include "request.h"
 #include "ref_alias.h"
+#include "sequence.h"
 #include "safetensors.h"
 #include "weights.h"
 
@@ -138,7 +139,8 @@ static void usage(const char *argv0) {
     printf("  --noise-end F           noise_scale_end (default 8.0)\n");
     printf("  --noise-clip F          noise_clip_std (default 8.0)\n");
     printf("  --lora FILE[:MULT]      apply LoRA adapter (repeatable)\n");
-    printf("  --ref-image PATH        reference image (repeatable, max 10)\n");
+    printf("  --ref-image PATH        reference image (repeatable, max %d)\n",
+           HD_SEQ_MAX_REFS);
     printf("  --keep-original-aspect  single ref: derive output dims from ref\n");
     printf("  --layout-bboxes JSON    layout bboxes for personalize+layout\n");
     printf("\n");
@@ -220,9 +222,9 @@ int main(int argc, char **argv) {
     char lora_paths[8][512];
     float lora_mults[8];
     int lora_count = 0;
-    hd_reference_image refs[10];
+    hd_reference_image refs[HD_SEQ_MAX_REFS];
     int ref_count = 0;
-    char ref_aliases[10][128];
+    char ref_aliases[HD_SEQ_MAX_REFS][128];
     int verbose = 0;
     int no_progress = 0;
     int keep_original_aspect = 0;
@@ -285,8 +287,9 @@ int main(int argc, char **argv) {
             lora_mults[lora_count] = mult;
             lora_count++;
         } else if (strcmp(argv[i], "--ref-image") == 0 && i + 1 < argc) {
-            if (ref_count >= 10) {
-                fprintf(stderr, "too many --ref-image (max 10)\n");
+            if (ref_count >= HD_SEQ_MAX_REFS) {
+                fprintf(stderr, "too many --ref-image (max %d)\n",
+                        HD_SEQ_MAX_REFS);
                 return 2;
             }
             const char *alias = NULL, *rpath = NULL;

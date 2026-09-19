@@ -21,8 +21,9 @@
 extern "C" {
 #endif
 
-/* Maximum references tracked (matches HD_SEQ_MAX_REFS). */
-#define HD_REF_ALIAS_MAX 16
+/* Maximum references tracked. Must stay >= HD_SEQ_MAX_REFS; kept literal so
+ * this module stays free of model/CUDA headers. */
+#define HD_REF_ALIAS_MAX 20
 
 /* One effective reference (user or internal) plus its aliases. */
 typedef struct {
