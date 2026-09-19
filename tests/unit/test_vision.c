@@ -123,17 +123,29 @@ int main(void) {
     }
 
     /* ---- resolve weights from the real model ---- */
-    hd_st_index idx;
-    if (hd_st_index_load("models/dev", &idx) != HD_OK) {
-        printf("FAIL: index load\n");
-        return 1;
-    }
+    const char *model_path = getenv("HD_TEST_MODEL_PATH");
+    if (!model_path || !model_path[0]) model_path = "models/dev";
     hd_weight_store store;
-    if (hd_weights_to_device("models/dev", &idx, 0, &store) != HD_OK) {
-        printf("FAIL: weights load: %s\n", hd_weights_last_error());
-        return 1;
+    size_t model_len = strlen(model_path);
+    if (model_len > 5 &&
+        strcmp(model_path + model_len - 5, ".gguf") == 0) {
+        if (hd_weights_to_device_gguf(model_path, 0, &store) != HD_OK) {
+            printf("FAIL: GGUF weights load: %s\n", hd_weights_last_error());
+            return 1;
+        }
+    } else {
+        hd_st_index idx;
+        if (hd_st_index_load(model_path, &idx) != HD_OK) {
+            printf("FAIL: index load\n");
+            return 1;
+        }
+        if (hd_weights_to_device(model_path, &idx, 0, &store) != HD_OK) {
+            printf("FAIL: weights load: %s\n", hd_weights_last_error());
+            hd_st_index_free(&idx);
+            return 1;
+        }
+        hd_st_index_free(&idx);
     }
-    hd_st_index_free(&idx);
 
     hd_vision_binding vb;
     if (hd_vision_resolve(&store, &vb) != HD_OK) {
@@ -517,21 +529,42 @@ int main(void) {
         free(emb_bf16); free(emb_f32);
     }
 
-    /* ---- compare deepstack 0 ---- */
+    /* ---- compare all DeepStack outputs ---- */
     {
+        const char *names[HD_VISION_NUM_DS] = {
+            "deepstack_0", "deepstack_1", "deepstack_2"
+        };
+        void *native_ds[HD_VISION_NUM_DS] = {ds_d, ds1_d, ds2_d};
         uint16_t *ds_bf16 = malloc((size_t)m * HD_VISION_OUT_HIDDEN * 2);
         float *ds_f32 = malloc((size_t)m * HD_VISION_OUT_HIDDEN * sizeof(float));
-        cudaMemcpy(ds_bf16, ds_d, (size_t)m * HD_VISION_OUT_HIDDEN * 2,
-                   cudaMemcpyDeviceToHost);
-        hd_bf16_buf_to_f32(ds_bf16, ds_f32, (size_t)m * HD_VISION_OUT_HIDDEN);
-        float c = cosine(ds_f32, ds, (size_t)m * HD_VISION_OUT_HIDDEN);
-        float r = nrmse(ds_f32, ds, (size_t)m * HD_VISION_OUT_HIDDEN);
-        printf("deepstack_0: cos=%.6f nrmse=%.6f\n", c, r);
-        CHECK(c > 0.99f, "deepstack_0 cosine > 0.99");
+        for (int i = 0; i < HD_VISION_NUM_DS; i++) {
+            size_t n_ref = 0;
+            float *ref = i == 0 ? ds : load_f32(names[i], &n_ref);
+            if (!ref || (i > 0 && n_ref != (size_t)m * HD_VISION_OUT_HIDDEN)) {
+                CHECK(0, "load DeepStack oracle");
+                free(i == 0 ? NULL : ref);
+                continue;
+            }
+            cudaMemcpy(ds_bf16, native_ds[i],
+                       (size_t)m * HD_VISION_OUT_HIDDEN * 2,
+                       cudaMemcpyDeviceToHost);
+            hd_bf16_buf_to_f32(ds_bf16, ds_f32,
+                               (size_t)m * HD_VISION_OUT_HIDDEN);
+            float c = cosine(ds_f32, ref,
+                             (size_t)m * HD_VISION_OUT_HIDDEN);
+            float r = nrmse(ds_f32, ref,
+                            (size_t)m * HD_VISION_OUT_HIDDEN);
+            printf("%s: cos=%.6f nrmse=%.6f\n", names[i], c, r);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "%s cosine > 0.99", names[i]);
+            CHECK(c > 0.99f, msg);
+            if (i > 0) free(ref);
+        }
         free(ds_bf16); free(ds_f32);
     }
 
-    cudaFree(pv_d); cudaFree(emb_d); cudaFree(ds_d); cudaFree(wsbase);
+    cudaFree(pv_d); cudaFree(emb_d); cudaFree(ds_d);
+    cudaFree(ds1_d); cudaFree(ds2_d); cudaFree(wsbase);
     if (ws.sdpa) hd_sdpa_destroy(ws.sdpa);
     hd_weight_store_free(&store);
     free(pv); free(pe); free(rot); free(emb); free(ds);
