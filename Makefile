@@ -21,7 +21,11 @@ CUDNN_LDFLAGS  := -L$(CUDNN_HOME)/lib -lcudnn
 
 CORE_SRCS := src/model/model.c src/io/json.c src/io/sha256.c src/io/safetensors.c src/io/gguf.c
 
+# Model used by the resident-engine preload test (override on the command line).
+ENGINE_MODEL ?= artifacts/models/hidream-o1-dev-bf16.gguf
+
 BIN        := build/hidream
+SERVER_BIN := build/hidream-server
 TEST_BIN   := build/test_model_loader
 TEST_W_BIN := build/test_weights
 CUBIN      := build/obj/cuda
@@ -90,7 +94,7 @@ SRCS      := src/main.c $(CORE_SRCS) src/model/weights.c src/model/block.c \
              src/model/lora.c src/model/vision.c \
              src/runtime/sequence.c src/runtime/request.c src/runtime/decode.c \
              src/runtime/ref_alias.c src/runtime/torch_rng.c \
-             src/runtime/generate.c src/io/png_wrap.c \
+             src/runtime/generate.c src/runtime/engine.c src/io/png_wrap.c \
              src/image/hd_image.c src/image/layout.c src/runtime/o1_timing.c
 OBJS      := $(SRCS:.c=.o)
 
@@ -268,6 +272,24 @@ $(TEST_PREVIEW_BIN): $(TEST_PREVIEW_OBJS)
 test-preview: $(TEST_PREVIEW_BIN)
 	./$(TEST_PREVIEW_BIN)
 
+TEST_ENGINE_BIN := build/test_engine_preload
+TEST_ENGINE_SRCS := tests/unit/test_engine_preload.c src/runtime/engine.c \
+                    src/runtime/generate.c src/runtime/request.c \
+                    src/runtime/sequence.c src/runtime/ref_alias.c \
+                    src/runtime/decode.c src/runtime/torch_rng.c \
+                    src/runtime/o1_timing.c src/model/block.c \
+                    src/model/forward.c src/model/scheduler.c \
+                    src/model/tokenizer.c src/model/lora.c src/model/vision.c \
+                    src/image/hd_image.c src/image/layout.c src/io/png_wrap.c \
+                    $(CORE_SRCS) src/model/weights.c
+TEST_ENGINE_OBJS := $(TEST_ENGINE_SRCS:.c=.o)
+$(TEST_ENGINE_BIN): $(TEST_ENGINE_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_ENGINE_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++ -l:libjpeg.so.8
+
+test-engine: $(TEST_ENGINE_BIN)
+	./$(TEST_ENGINE_BIN) $(ENGINE_MODEL)
+
 TEST_M17B_BIN := build/test_m1_7_base
 TEST_M17B_SRCS := tests/unit/test_m1_7_base.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_M17B_OBJS := $(TEST_M17B_SRCS:.c=.o)
@@ -396,6 +418,36 @@ $(TIMING_BIN): $(TIMING_OBJS) $(CUDA_OBJS)
 
 timing: $(TIMING_BIN)
 
+# OpenAI-compatible Images API server. It links the same runtime/CUDA objects
+# as the CLI: no inference logic is duplicated, only the HTTP layer is added.
+SERVER_SRCS := src/server/o1_server.c $(filter-out src/main.c,$(SRCS))
+SERVER_OBJS := $(SERVER_SRCS:.c=.o)
+$(SERVER_BIN): $(SERVER_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(SERVER_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++ -l:libjpeg.so.8 -lpthread
+
+server: $(SERVER_BIN)
+
+# Model-free server unit tests: the server TU is included directly, so only
+# the runtime objects it references are needed (no CUDA, no weights).
+TEST_SERVER_BIN := build/test_server
+TEST_SERVER_SRCS := tests/unit/test_server.c src/runtime/request.c \
+                    src/runtime/sequence.c src/model/tokenizer.c \
+                    src/image/layout.c src/image/hd_image.c \
+                    src/io/png_wrap.c $(CORE_SRCS)
+TEST_SERVER_OBJS := $(TEST_SERVER_SRCS:.c=.o)
+# The server TU is included whole, so its socket/worker entry points are
+# legitimately unused in this test binary.
+tests/unit/test_server.o: tests/unit/test_server.c src/server/o1_server.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Wno-unused-function $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
+$(TEST_SERVER_BIN): $(TEST_SERVER_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SERVER_OBJS) -lm -l:libjpeg.so.8 -lpthread
+
+test-server: $(TEST_SERVER_BIN)
+	./$(TEST_SERVER_BIN)
+
 
 
 %.o: %.c
@@ -420,7 +472,7 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity test-server test-engine server clean
 # Base FlowUniPC CUDA kernel validation (M-post base default path).
 TEST_BUNIPC_BIN := build/test_base_unipc_cuda
 TEST_BUNIPC_SRCS := tests/unit/test_base_unipc_cuda.c src/model/scheduler.c $(CORE_SRCS)

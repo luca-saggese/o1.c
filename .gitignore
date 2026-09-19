@@ -33,3 +33,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# --- Local scratch (oracle venv, second reference checkout, ad-hoc outputs) ---
+/.venv-oracle/
+/_reference2/
+/*-output.json
+/*-output.png
+/girl2.json
+/girl2.png

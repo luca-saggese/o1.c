@@ -383,6 +383,152 @@ dimensions from the source image:
 See [`example_assets/README.md`](example_assets/README.md) for attribution,
 additional context and the upstream prompts associated with these assets.
 
+## Server / OpenAI-compatible Images API
+
+`build/hidream-server` exposes the same generation engine as the CLI through
+an OpenAI-compatible Images API. It keeps **one model resident**: the weights
+are loaded once at startup and every request reuses them, so request latency
+is the generation itself, not a model reload.
+
+### Startup
+
+```sh
+export LD_LIBRARY_PATH=/home/lvx/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+
+./build/hidream-server --port 8000 --model dev
+```
+
+Options:
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `--host HOST` | `127.0.0.1` | Listen address |
+| `--port N` | `8000` | TCP port |
+| `--model dev\|base` | `dev` | Profile to load and keep resident |
+| `--model-dir PATH` | per-profile GGUF | Weights directory or `.gguf` pack |
+| `--api-key SECRET` | none | Require `Authorization: Bearer SECRET` |
+| `--cors` | off | Emit permissive CORS headers, answer `OPTIONS` with 204 |
+| `--queue-depth N` | `8` | Maximum *waiting* jobs before `429 queue_full` |
+| `--max-body-mb N` | `64` | Maximum request body size (`413` beyond it) |
+| `--device N` | `0` | CUDA device index |
+| `--lora FILE[:MULT]` | none | Merge a LoRA adapter at startup (repeatable) |
+
+At shutdown (`SIGINT`/`SIGTERM`) the server stops accepting, drains the
+in-flight request, then prints the preload-lifecycle release gate to stderr:
+
+```text
+hidream-server: shutting down
+hidream-server: lifecycle open=1 weight_load=1 forward_resolve=1 vision_resolve=1 requests=2 close=1
+```
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/healthz` | Liveness + loaded profile |
+| `GET` | `/v1/models` | Advertises the resident model id |
+| `POST` | `/v1/images/generations` | JSON text-to-image |
+| `POST` | `/v1/images/edits` | `multipart/form-data`, reference images |
+
+### Supported fields
+
+Standard OpenAI fields: `prompt`, `model`, `n` (1–4), `size`, `quality`
+(`auto` only), `response_format` (`b64_json` only), `output_format` (`png`
+only), `background` (`auto`/`opaque`), `user`, and — on edits — `image` /
+`image[]` plus `mask` (rejected).
+
+Engine-specific fields (prefixed `o1_`):
+
+| Field | Meaning |
+|-------|---------|
+| `o1_mode` | `t2i`, `edit`, `personalize`/`multi-ref`, `personalize_layout`/`layout` |
+| `o1_seed` | 64-bit seed; with `n>1` image *i* uses `seed+i` |
+| `o1_steps` | Denoising steps (1–64) |
+| `o1_guidance_scale`, `o1_shift` | Sampler overrides |
+| `o1_scheduler` | `flash`, `flow_match`, `default`/`unipc` |
+| `o1_noise_start`, `o1_noise_end`, `o1_noise_clip` | Noise schedule overrides |
+| `o1_keep_original_aspect` | Derive output dims from a single reference |
+| `o1_exact_size` | Fail instead of snapping to a supported bucket |
+| `o1_reference_aliases` | JSON array, one `@name` per input image |
+| `o1_layout_bboxes` | Layout description for `personalize_layout` |
+| `o1_verbose` | Log the reference mapping and expanded prompt to stderr |
+
+### Known unsupported fields
+
+`mask` (`mask_not_supported`), `background=transparent`
+(`unsupported_background`), any `output_format` other than `png`
+(`unsupported_output_format`), `response_format=url`, `compression`,
+`quality` presets, and per-request `o1_lora` (adapters are startup-global).
+`o1_mode=personalize_skeleton` is rejected: skeleton conditioning is not
+implemented by the server.
+
+### Resolution snapping
+
+The engine only generates at frozen buckets (`2048x2048`, `2304x1728`,
+`1728x2304`, `2560x1440`, …). A requested `size` is snapped to the nearest
+bucket and the server logs the substitution:
+
+```text
+hidream-server: request size 1024x1024 snapped to 2048x2048
+```
+
+`1024x1024` is **not** a bucket. Pass `o1_exact_size: true` to fail with
+`400 unsupported_size` instead of snapping.
+
+### curl examples
+
+```sh
+# Text to image
+curl -s http://127.0.0.1:8000/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"hidream-o1-image-dev","prompt":"a red apple on a wooden table",
+       "size":"2048x2048","o1_seed":42,"o1_steps":28}' \
+  | python3 -c 'import sys,json,base64;open("out.png","wb").write(base64.b64decode(json.load(sys.stdin)["data"][0]["b64_json"]))'
+
+# Edit (single reference)
+curl -s http://127.0.0.1:8000/v1/images/edits \
+  -F model=hidream-o1-image-dev \
+  -F prompt='remove the earphones' \
+  -F o1_mode=edit -F o1_seed=7 \
+  -F image=@example_assets/edit/test.jpg \
+  -o edit.json
+
+# Multi-reference personalization with named references
+curl -s http://127.0.0.1:8000/v1/images/edits \
+  -F model=hidream-o1-image-dev \
+  -F prompt='a photo of @subject in the style of @style' \
+  -F o1_mode=personalize \
+  -F 'o1_reference_aliases=["subject","style"]' \
+  -F image=@example_assets/IP_2.jpg \
+  -F image=@example_assets/edit/test.jpg \
+  -o multiref.json
+```
+
+An `@name` that has no matching entry in `o1_reference_aliases` is left
+**verbatim** in the prompt and does not fail the request.
+
+### OpenAI Python SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="local")
+
+r = client.images.generate(
+    model="hidream-o1-image-dev",
+    prompt="A cinematic photograph of a red fox in snow",
+    size="2048x2048",
+    extra_body={"o1_seed": 42, "o1_steps": 28},
+)
+open("fox.png", "wb").write(__import__("base64").b64decode(r.data[0].b64_json))
+```
+
+A full end-to-end SDK smoke test (generate + single-reference edit +
+multi-reference personalization) lives in
+[`tests/server/openai_client_smoke.py`](tests/server/openai_client_smoke.py);
+the failure-path suite lives in
+[`tests/server/failure_cases.py`](tests/server/failure_cases.py).
+
 ## Test suite
 
 `make test-*` targets (all C/CUDA, no Python):
@@ -407,6 +553,8 @@ additional context and the upstream prompts associated with these assets.
 | `test-final-head` | final-head GEMM decisive test (5 configs) |
 | `test-gguf` | GGUF pack header parse + payload round-trip vs safetensors |
 | `bench-block` | per-stage decoder block benchmark (CUDA events) |
+| `test-engine` | resident engine preload lifecycle (spec §32.2 release gate) |
+| `test-server` | server unit tests (JSON/multipart/base64/limits) |
 
 ## Milestone status
 

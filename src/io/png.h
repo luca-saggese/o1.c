@@ -106,6 +106,13 @@ int png_save_with_text(const png_image *img, const char *path,
                        const char *keyword, const char *text);
 
 /*
+ * Encode PNG to a freshly malloc'd memory buffer (no filesystem access).
+ * On success *out points to the PNG bytes and *out_len to their length;
+ * the caller frees *out. Returns 0 on success, -1 on error.
+ */
+int png_encode_mem(const png_image *img, uint8_t **out, size_t *out_len);
+
+/*
  * Create a new image with given dimensions.
  * Allocates zeroed pixel data.
  */
@@ -270,7 +277,62 @@ static uint8_t *png_deflate_store(const uint8_t *data, size_t len, size_t *out_l
  * Chunk Writing
  * ======================================================================== */
 
-static void png_write_chunk(FILE *f, const char *type, const uint8_t *data, size_t len) {
+/* Output sink for the encoder. It abstracts over a FILE* and a growable
+ * in-memory buffer so the same chunk-writing code can either stream to
+ * disk or build the PNG entirely in RAM. */
+typedef struct png_out {
+    FILE *file;       /* non-NULL when streaming to a file */
+    uint8_t *data;    /* non-NULL when encoding into memory */
+    size_t len;
+    size_t cap;
+    int error;
+} png_out;
+
+static void png_out_init_file(png_out *o, FILE *f) {
+    o->file = f;
+    o->data = NULL;
+    o->len = 0;
+    o->cap = 0;
+    o->error = 0;
+}
+
+static void png_out_init_mem(png_out *o) {
+    o->file = NULL;
+    o->data = NULL;
+    o->len = 0;
+    o->cap = 0;
+    o->error = 0;
+}
+
+static void png_out_free(png_out *o) {
+    free(o->data);
+    o->data = NULL;
+    o->len = 0;
+    o->cap = 0;
+}
+
+static void png_out_write(png_out *o, const uint8_t *data, size_t len) {
+    if (len == 0 || o->error) return;
+    if (o->file) {
+        if (fwrite(data, 1, len, o->file) != len) o->error = 1;
+        return;
+    }
+    if (o->len + len > o->cap) {
+        size_t cap = o->cap ? o->cap : 4096;
+        while (cap < o->len + len) {
+            if (cap > (size_t)-1 / 2) { o->error = 1; return; }
+            cap *= 2;
+        }
+        uint8_t *grown = (uint8_t *)realloc(o->data, cap);
+        if (!grown) { o->error = 1; return; }
+        o->data = grown;
+        o->cap = cap;
+    }
+    memcpy(o->data + o->len, data, len);
+    o->len += len;
+}
+
+static void png_write_chunk(png_out *o, const char *type, const uint8_t *data, size_t len) {
     /* Length (big-endian) */
     uint8_t len_bytes[4] = {
         (len >> 24) & 0xff,
@@ -278,14 +340,14 @@ static void png_write_chunk(FILE *f, const char *type, const uint8_t *data, size
         (len >> 8) & 0xff,
         len & 0xff
     };
-    fwrite(len_bytes, 1, 4, f);
+    png_out_write(o, len_bytes, 4);
 
     /* Type */
-    fwrite(type, 1, 4, f);
+    png_out_write(o, (const uint8_t *)type, 4);
 
     /* Data */
     if (len > 0 && data) {
-        fwrite(data, 1, len, f);
+        png_out_write(o, data, len);
     }
 
     /* CRC (over type + data) */
@@ -303,10 +365,10 @@ static void png_write_chunk(FILE *f, const char *type, const uint8_t *data, size
         (crc >> 8) & 0xff,
         crc & 0xff
     };
-    fwrite(crc_bytes, 1, 4, f);
+    png_out_write(o, crc_bytes, 4);
 }
 
-static void png_write_text_chunk(FILE *f, const char *keyword, const char *text) {
+static void png_write_text_chunk(png_out *o, const char *keyword, const char *text) {
     size_t key_len = strlen(keyword);
     size_t text_len = strlen(text);
     size_t data_len = key_len + 1 + text_len;  /* keyword + null + text */
@@ -318,7 +380,7 @@ static void png_write_text_chunk(FILE *f, const char *keyword, const char *text)
     data[key_len] = 0;  /* Null separator */
     memcpy(data + key_len + 1, text, text_len);
 
-    png_write_chunk(f, "tEXt", data, data_len);
+    png_write_chunk(o, "tEXt", data, data_len);
     free(data);
 }
 
@@ -326,11 +388,11 @@ static void png_write_text_chunk(FILE *f, const char *keyword, const char *text)
  * PNG Writing
  * ======================================================================== */
 
-static int png_save_internal(const png_image *img, FILE *f,
+static int png_save_internal(const png_image *img, png_out *o,
                              const char *keyword, const char *text) {
     /* PNG signature */
     const uint8_t signature[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
-    fwrite(signature, 1, 8, f);
+    png_out_write(o, signature, 8);
 
     /* IHDR chunk */
     uint8_t ihdr[13];
@@ -349,11 +411,11 @@ static int png_save_internal(const png_image *img, FILE *f,
     ihdr[11] = 0;  /* Filter */
     ihdr[12] = 0;  /* Interlace */
 
-    png_write_chunk(f, "IHDR", ihdr, 13);
+    png_write_chunk(o, "IHDR", ihdr, 13);
 
     /* Write metadata if provided */
     if (keyword && text) {
-        png_write_text_chunk(f, keyword, text);
+        png_write_text_chunk(o, keyword, text);
     }
 
     /* Prepare raw image data with filter bytes */
@@ -377,13 +439,13 @@ static int png_save_internal(const png_image *img, FILE *f,
     if (!compressed) return -1;
 
     /* IDAT chunk */
-    png_write_chunk(f, "IDAT", compressed, compressed_len);
+    png_write_chunk(o, "IDAT", compressed, compressed_len);
     free(compressed);
 
     /* IEND chunk */
-    png_write_chunk(f, "IEND", NULL, 0);
+    png_write_chunk(o, "IEND", NULL, 0);
 
-    return 0;
+    return o->error ? -1 : 0;
 }
 
 int png_save(const png_image *img, const char *path) {
@@ -392,8 +454,10 @@ int png_save(const png_image *img, const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
 
-    int result = png_save_internal(img, f, NULL, NULL);
-    fclose(f);
+    png_out o;
+    png_out_init_file(&o, f);
+    int result = png_save_internal(img, &o, NULL, NULL);
+    if (fclose(f) != 0) result = -1;
     return result;
 }
 
@@ -404,9 +468,27 @@ int png_save_with_text(const png_image *img, const char *path,
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
 
-    int result = png_save_internal(img, f, keyword, text);
-    fclose(f);
+    png_out o;
+    png_out_init_file(&o, f);
+    int result = png_save_internal(img, &o, keyword, text);
+    if (fclose(f) != 0) result = -1;
     return result;
+}
+
+int png_encode_mem(const png_image *img, uint8_t **out, size_t *out_len) {
+    if (!img || !out || !out_len) return -1;
+    *out = NULL;
+    *out_len = 0;
+
+    png_out o;
+    png_out_init_mem(&o);
+    if (png_save_internal(img, &o, NULL, NULL) != 0) {
+        png_out_free(&o);
+        return -1;
+    }
+    *out = o.data;
+    *out_len = o.len;
+    return 0;
 }
 
 /* ========================================================================

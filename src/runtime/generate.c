@@ -24,6 +24,8 @@
  */
 
 #include "generate.h"
+#include "engine.h"
+#include "engine_priv.h"
 #include "vision.h"
 #include "vision_kernels.h"
 #include "hd_image.h"
@@ -213,8 +215,8 @@ static hd_status build_t2i_ids(const char *prompt, int64_t **out_ids,
  * Dev/flash scheduler only (editing default per upstream). The known
  * pre-existing multi-step "double free" engine bug is not addressed here.
  */
-static hd_status hd_generate_ref(const hd_generation_request *req,
-                                 const char *model_dir, int device_id,
+hd_status hd_engine_generate_ref(hd_generation_engine *e,
+                                 const hd_generation_request *req,
                                  unsigned char **out_rgb, int *out_w,
                                  int *out_h) {
     int W = req->width, Hh = req->height;
@@ -417,56 +419,9 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     int text_len = seq.text_len;
     O1_TIMING_END("PROMPT_TOKENIZE");
 
-    /* ---- load weights ---- */
+    /* ---- resident weights (loaded once by the engine) ---- */
     O1_TIMING_BEGIN("INPUT_PREPARE");
-    hd_weight_store store = {0};
-    size_t mdlen = strlen(model_dir);
-    int is_gguf = mdlen > 5 && strcmp(model_dir + mdlen - 5, ".gguf") == 0;
-    if (is_gguf) {
-        st = hd_weights_to_device_gguf(model_dir, device_id, &store);
-        if (st != HD_OK) {
-            hd_set_error("generate: weights: %s", hd_weights_last_error());
-            hd_sequence_free(&seq);
-            free(ref_patches);
-            return st;
-        }
-    } else {
-        hd_st_index idx;
-        if (hd_st_index_load(model_dir, &idx) != HD_OK) {
-            hd_set_error("generate: index: %s", hd_st_last_error());
-            hd_sequence_free(&seq);
-            free(ref_patches);
-            return HD_ERR_IO;
-        }
-        st = hd_weights_to_device(model_dir, &idx, device_id, &store);
-        hd_st_index_free(&idx);
-        if (st != HD_OK) {
-            hd_set_error("generate: weights: %s", hd_weights_last_error());
-            hd_sequence_free(&seq);
-            free(ref_patches);
-            return st;
-        }
-    }
-    hd_forward_binding bw;
-    st = hd_forward_resolve(&store, NLAYERS, &bw);
-    if (st != HD_OK) {
-        hd_set_error("generate: resolve: %s", hd_last_error());
-        hd_weight_store_free(&store);
-        hd_sequence_free(&seq);
-        free(ref_patches);
-        return st;
-    }
-    if (req->lora) {
-        st = hd_lora_apply(req->lora, &store, device_id);
-        if (st != HD_OK) {
-            hd_set_error("generate: lora: %s", hd_lora_last_error());
-            hd_forward_binding_free(&bw);
-            hd_weight_store_free(&store);
-            hd_sequence_free(&seq);
-            free(ref_patches);
-            return st;
-        }
-    }
+    hd_forward_binding *bw = &e->bw;
 
     /* ---- PATH B: Qwen-VL semantic conditioning (computed ONCE) ---- */
     /* Resolve the vision tower weights and run the tower on every
@@ -476,21 +431,10 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     memset(&visual, 0, sizeof(visual));
     void *vimg_emb = NULL, *vds0 = NULL, *vds1 = NULL, *vds2 = NULL;
     uint8_t *vmask_h = NULL, *vmask_dev = NULL;
-    hd_vision_binding vb;
+    hd_vision_binding *vb = &e->vb;
     hd_vision_workspace vws;
-    memset(&vb, 0, sizeof(vb));
     memset(&vws, 0, sizeof(vws));
     {
-        st = hd_vision_resolve(&store, &vb);
-        if (st != HD_OK) {
-            hd_set_error("generate: vision resolve: %s", hd_last_error());
-            hd_forward_binding_free(&bw);
-            hd_weight_store_free(&store);
-            hd_sequence_free(&seq);
-            free(ref_patches);
-            for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
-            return st;
-        }
         /* V = total merged vision tokens = sum(cond_h*cond_w) */
         int V_total = 0;
         int max_N = 0;
@@ -501,8 +445,6 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         visual.v_tokens = V_total;
         if (V_total <= 0) {
             hd_set_error("generate: zero vision tokens");
-            hd_forward_binding_free(&bw);
-            hd_weight_store_free(&store);
             hd_sequence_free(&seq);
             free(ref_patches);
             for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
@@ -516,8 +458,6 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         if (!vwsbase) {
             hd_set_error("generate: vision workspace alloc %lld bytes",
                          (long long)vws_bytes);
-            hd_forward_binding_free(&bw);
-            hd_weight_store_free(&store);
             hd_sequence_free(&seq);
             free(ref_patches);
             for (int r = 0; r < K; r++) if (vlm_imgs[r].rgb) hd_image_free(&vlm_imgs[r]);
@@ -616,7 +556,7 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
                 (uint8_t *)vds1 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
                 (uint8_t *)vds2 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
             };
-            st = hd_vision_forward(&vb, &vws, pv_dev, N, gh, gw,
+            st = hd_vision_forward(vb, &vws, pv_dev, N, gh, gw,
                                    (uint8_t *)vimg_emb +
                                        (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
                                    vds_out);
@@ -659,8 +599,6 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         visual.visual_mask = vmask_dev;
         goto vision_done;
     vision_fail:
-        hd_forward_binding_free(&bw);
-        hd_weight_store_free(&store);
         hd_sequence_free(&seq);
         free(ref_patches);
         if (vwsbase) dev_free(vwsbase);
@@ -684,8 +622,6 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     void *wsbase = dev_alloc((size_t)ws_bytes);
     if (!wsbase) {
         hd_set_error("generate: workspace alloc %lld bytes", (long long)ws_bytes);
-        hd_forward_binding_free(&bw);
-        hd_weight_store_free(&store);
         hd_sequence_free(&seq);
         free(ref_patches);
         return HD_ERR_OOM;
@@ -711,8 +647,6 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     void *secd = dev_alloc(sizeof(sec_host));
     if (!posd || !maskd || !idsd || !secd) {
         hd_set_error("generate: input alloc oom");
-        hd_forward_binding_free(&bw);
-        hd_weight_store_free(&store);
         hd_sequence_free(&seq);
         free(ref_patches);
         dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
@@ -800,6 +734,9 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
                                                req->noise_clip_std);
     else if (req->steps <= 1 || req->steps == 28)
         n_sigmas = hd_scheduler_derive_dev(&sched, req->noise_clip_std);
+    else if (req->scheduler == HD_SCHED_FLOW_MATCH)
+        n_sigmas = hd_scheduler_derive_flow_match(&sched, req->steps, req->shift,
+                                                  req->noise_clip_std);
     else
         n_sigmas = hd_scheduler_derive_flash(&sched, req->steps, req->shift,
                                              req->noise_clip_std);
@@ -827,7 +764,7 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
         cudaMemcpy((char *)vinput_dev + nimg * 2, ref_dev,
                    total_ref_tokens * FF * 2, cudaMemcpyDeviceToDevice);
 
-        st = hd_forward(&bw, &ws, (const int64_t *)idsd, text_len,
+        st = hd_forward(bw, &ws, (const int64_t *)idsd, text_len,
                         (const float *)posd, maskd, vinput_dev, total_img,
                         &visual, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID,
                         NULL, out_dev, NULL);
@@ -854,32 +791,39 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
 
         hd_sched_vcond(z_prev_dev, xp_dev, sigma, mo_dev, (int)nimg);
 
-        /* per-step noise + Euler (dev/flash) */
-        hd_torch_randn_f32(&step_rng, noise_step, (int64_t)nimg);
-        float s_noise = req->noise_scale_start +
-                        (req->noise_scale_end - req->noise_scale_start) *
-                            (float)i / (float)(req->steps - 1);
-        float clip = req->noise_clip_std;
-        if (clip > 0.0f) {
-            double mean = 0.0, m2 = 0.0;
-            for (size_t k = 0; k < nimg; k++) mean += noise_step[k];
-            mean /= (double)nimg;
-            for (size_t k = 0; k < nimg; k++) {
-                double d = (double)noise_step[k] - mean;
-                m2 += d * d;
-            }
-            double std = sqrt(m2 / (double)(nimg - 1));
-            float clip_val = clip * (float)std;
-            for (size_t k = 0; k < nimg; k++) {
-                if (noise_step[k] > clip_val) noise_step[k] = clip_val;
-                else if (noise_step[k] < -clip_val) noise_step[k] = -clip_val;
-            }
-        }
-        cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
-
         O1_TIMING_BEGIN_GPU("SCHEDULER");
-        st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev, s_noise,
-                               z_next_dev, (int)nimg, scratch);
+        if (req->scheduler == HD_SCHED_FLOW_MATCH) {
+            hd_sched_flow_match_step(z_prev_dev, mo_dev, sched.sigmas[i],
+                                     sched.sigmas[i + 1], z_next_dev,
+                                     (int)nimg);
+            sched.step_index++;
+        } else {
+            /* per-step noise + Euler (dev/flash) */
+            hd_torch_randn_f32(&step_rng, noise_step, (int64_t)nimg);
+            float s_noise = req->noise_scale_start +
+                            (req->noise_scale_end - req->noise_scale_start) *
+                                (float)i / (float)(req->steps - 1);
+            float clip = req->noise_clip_std;
+            if (clip > 0.0f) {
+                double mean = 0.0, m2 = 0.0;
+                for (size_t k = 0; k < nimg; k++) mean += noise_step[k];
+                mean /= (double)nimg;
+                for (size_t k = 0; k < nimg; k++) {
+                    double d = (double)noise_step[k] - mean;
+                    m2 += d * d;
+                }
+                double std = sqrt(m2 / (double)(nimg - 1));
+                float clip_val = clip * (float)std;
+                for (size_t k = 0; k < nimg; k++) {
+                    if (noise_step[k] > clip_val) noise_step[k] = clip_val;
+                    else if (noise_step[k] < -clip_val) noise_step[k] = -clip_val;
+                }
+            }
+            cudaMemcpy(noise_dev, noise_step, nimg * 4, cudaMemcpyHostToDevice);
+
+            st = hd_scheduler_step(&sched, z_prev_dev, mo_dev, noise_dev,
+                                   s_noise, z_next_dev, (int)nimg, scratch);
+        }
         O1_TIMING_END_GPU("SCHEDULER");
         if (st != HD_OK) {
             hd_set_error("generate: scheduler step %d: %s", i, hd_last_error());
@@ -960,8 +904,6 @@ static hd_status hd_generate_ref(const hd_generation_request *req,
     if (vmask_h) free(vmask_h);
     if (vws.sdpa) hd_sdpa_destroy(vws.sdpa);
     if (vws.patch_out) dev_free(vws.patch_out);
-    hd_forward_binding_free(&bw);
-    hd_weight_store_free(&store);
     hd_sequence_free(&seq);
     free(ref_patches);
     return HD_OK;
@@ -981,27 +923,16 @@ fail:
     if (vws.patch_out) dev_free(vws.patch_out);
     if (z_final) free(z_final);
     if (rgb) free(rgb);
-    hd_forward_binding_free(&bw);
-    hd_weight_store_free(&store);
     hd_sequence_free(&seq);
     free(ref_patches);
     return HD_ERR_MISSING;
 }
 
-hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
-                      int device_id, unsigned char **out_rgb,
-                      int *out_w, int *out_h) {
-    if (!req || !model_dir || !out_rgb || !out_w || !out_h) {
-        hd_set_error("generate: null argument");
-        return HD_ERR_MISSING;
-    }
-    *out_rgb = NULL;
-    *out_w = *out_h = 0;
-
-    if (req->reference_count > 0) {
-        return hd_generate_ref(req, model_dir, device_id, out_rgb, out_w,
-                               out_h);
-    }
+hd_status hd_engine_generate_t2i(hd_generation_engine *e,
+                                 const hd_generation_request *req,
+                                 unsigned char **out_rgb, int *out_w,
+                                 int *out_h) {
+    hd_status st = HD_OK;
     if (req->mode != HD_MODE_T2I) {
         hd_set_error("generate: mode '%s' staged behind unified sequence "
                      "builder (M1-post.3); T2I is the production path",
@@ -1036,7 +967,6 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     for (int b = 0; b < 2; b++) memset(&decks[b], 0, sizeof(decks[b]));
     int seq_text_len[2], seq_S[2];
     const char *cap[2] = { req->prompt, " " };
-    hd_status st;
 
     /* Aliases require references; with none, any `@alias` is an error. */
     {
@@ -1083,57 +1013,9 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     int seq_S_uncond = seq_S[1], seq_text_len_uncond = seq_text_len[1];
     int text_len_uncond = seq_text_len[1];
 
-    /* ---- load weights ---- */
+    /* ---- resident weights (loaded once by the engine) ---- */
     O1_TIMING_BEGIN("INPUT_PREPARE");
-    hd_weight_store store = {0};
-    size_t mdlen = strlen(model_dir);
-    int is_gguf = mdlen > 5 && strcmp(model_dir + mdlen - 5, ".gguf") == 0;
-    if (is_gguf) {
-        st = hd_weights_to_device_gguf(model_dir, device_id, &store);
-        if (st != HD_OK) {
-            hd_set_error("generate: weights: %s", hd_weights_last_error());
-            hd_sequence_free(&decks[0]);
-            return st;
-        }
-    } else {
-        hd_st_index idx;
-        if (hd_st_index_load(model_dir, &idx) != HD_OK) {
-            hd_set_error("generate: index: %s", hd_st_last_error());
-            hd_sequence_free(&decks[0]);
-            return HD_ERR_IO;
-        }
-        st = hd_weights_to_device(model_dir, &idx, device_id, &store);
-        hd_st_index_free(&idx);
-        if (st != HD_OK) {
-            hd_set_error("generate: weights: %s", hd_weights_last_error());
-            hd_sequence_free(&decks[0]);
-            return st;
-        }
-    }
-    hd_forward_binding bw;
-    st = hd_forward_resolve(&store, NLAYERS, &bw);
-    if (st != HD_OK) {
-        hd_set_error("generate: resolve: %s", hd_last_error());
-        hd_weight_store_free(&store);
-        hd_sequence_free(&decks[0]);
-        return st;
-    }
-
-    /* ---- LoRA merge-on-load (optional) ----
-     * Applies adapters to the resident base weights in place, then the
-     * normal cuBLAS forward path runs unchanged. */
-    if (req->lora) {
-        O1_TIMING_BEGIN("LORA_APPLY");
-        st = hd_lora_apply(req->lora, &store, device_id);
-        O1_TIMING_END("LORA_APPLY");
-        if (st != HD_OK) {
-            hd_set_error("generate: lora: %s", hd_lora_last_error());
-            hd_forward_binding_free(&bw);
-            hd_weight_store_free(&store);
-            hd_sequence_free(&decks[0]);
-            return st;
-        }
-    }
+    hd_forward_binding *bw = &e->bw;
 
     /* ---- workspace ----
        Two forward contexts: the canonical conditional deck and (with CFG)
@@ -1152,8 +1034,6 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     void *wsbase = dev_alloc((size_t)ws_total);
     if (!wsbase) {
         hd_set_error("generate: workspace alloc %lld bytes", (long long)ws_total);
-        hd_forward_binding_free(&bw);
-        hd_weight_store_free(&store);
         hd_sequence_free(&decks[0]);
         if (use_cfg) hd_sequence_free(&decks[1]);
         return HD_ERR_OOM;
@@ -1202,8 +1082,6 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         idsd[b] = dev_alloc((size_t)seq_text_len[b] * 8);
         if (!posd[b] || !maskd[b] || !idsd[b] || !secd) {
             hd_set_error("generate: input alloc oom");
-            hd_forward_binding_free(&bw);
-            hd_weight_store_free(&store);
             for (int q = 0; q < nbranch; q++) hd_sequence_free(&decks[q]);
             dev_free(wsbase); dev_free(secd);
             dev_free(posd[0]); dev_free(maskd[0]); dev_free(idsd[0]);
@@ -1329,7 +1207,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
         cudaMemcpy(tsd, &t_pixeldit, 4, cudaMemcpyHostToDevice);
 
         /* ---- conditional forward ---- */
-        st = hd_forward(&bw, &ws, (const int64_t *)idsd[0], text_len,
+        st = hd_forward(bw, &ws, (const int64_t *)idsd[0], text_len,
                         (const float *)posd[0], maskd[0], z_prev_dev, IMG,
                         NULL, tsd, secd, S, NH, NKV, H, I, HD, TMS_ID, NULL,
                         out_dev, NULL);
@@ -1349,7 +1227,7 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
                If guidance>1 run the unconditional branch and combine
                pred = uncond + g*(cond - uncond)  (= -v_guided). */
             if (use_cfg) {
-                st = hd_forward(&bw, &ws_uncond,
+                st = hd_forward(bw, &ws_uncond,
                                 (const int64_t *)idsd[1], seq_text_len[1],
                                 (const float *)posd[1], maskd[1], z_prev_dev,
                                 IMG, NULL, tsd, secd, seq_S_uncond, NH, NKV, H,
@@ -1532,8 +1410,6 @@ hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
     } else {
         if (ws.sdpa) hd_sdpa_destroy(ws.sdpa);
     }
-    hd_forward_binding_free(&bw);
-    hd_weight_store_free(&store);
     hd_sequence_free(&decks[0]);
     if (nbranch > 1) hd_sequence_free(&decks[1]);
     return HD_OK;
@@ -1554,9 +1430,34 @@ fail:
     if (use_cfg && ws_uncond.sdpa) hd_sdpa_destroy(ws_uncond.sdpa);
     if (z_final) free(z_final);
     if (rgb) free(rgb);
-    hd_forward_binding_free(&bw);
-    hd_weight_store_free(&store);
     hd_sequence_free(&decks[0]);
     if (nbranch > 1) hd_sequence_free(&decks[1]);
     return HD_ERR_MISSING;
+}
+/*
+ * One-shot compatibility wrapper: open a resident engine, run one
+ * generation, close it. The CLI uses this; the server keeps the engine
+ * open across requests.
+ */
+hd_status hd_generate(const hd_generation_request *req, const char *model_dir,
+                      int device_id, unsigned char **out_rgb,
+                      int *out_w, int *out_h) {
+    if (!req || !model_dir || !out_rgb || !out_w || !out_h) {
+        hd_set_error("generate: null argument");
+        return HD_ERR_MISSING;
+    }
+    *out_rgb = NULL;
+    *out_w = *out_h = 0;
+
+    hd_generation_engine_options opts = {0};
+    opts.profile = req->profile;
+    opts.model_path = model_dir;
+    opts.device_id = device_id;
+    opts.lora = req->lora;
+    hd_generation_engine *e = hd_generation_engine_open(&opts);
+    if (!e) return HD_ERR_MISSING;
+
+    hd_status st = hd_generation_engine_generate(e, req, out_rgb, out_w, out_h);
+    hd_generation_engine_close(e);
+    return st;
 }

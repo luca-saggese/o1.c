@@ -115,6 +115,52 @@ int main(void)
     }
 
     free(buf);
+
+    /* In-memory encoder must produce byte-identical output to the file
+     * encoder for the same image (no tEXt chunk). */
+    unsigned char *rgb2 = malloc((size_t)TEST_W * TEST_H * 3u);
+    if (rgb2 == NULL) {
+        return fail("out of memory");
+    }
+    for (int y = 0; y < TEST_H; y++) {
+        for (int x = 0; x < TEST_W; x++) {
+            unsigned char *p = rgb2 + ((size_t)y * TEST_W + (size_t)x) * 3u;
+            p[0] = (unsigned char)x;
+            p[1] = (unsigned char)y;
+            p[2] = (unsigned char)((x + y) % 256);
+        }
+    }
+
+    unsigned char *mem = NULL;
+    size_t mem_len = 0;
+    if (hd_png_encode_rgb(rgb2, TEST_W, TEST_H, &mem, &mem_len) != 0) {
+        free(rgb2);
+        return fail("hd_png_encode_rgb failed");
+    }
+    free(rgb2);
+
+    if (mem_len < 8 || memcmp(mem, sig, 8) != 0) {
+        free(mem);
+        return fail("in-memory PNG has bad signature");
+    }
+    if (memcmp(mem + 12, "IHDR", 4) != 0) {
+        free(mem);
+        return fail("in-memory PNG missing IHDR");
+    }
+    unsigned int mw = ((unsigned int)mem[16] << 24) | ((unsigned int)mem[17] << 16) |
+                      ((unsigned int)mem[18] << 8) | (unsigned int)mem[19];
+    unsigned int mh = ((unsigned int)mem[20] << 24) | ((unsigned int)mem[21] << 16) |
+                      ((unsigned int)mem[22] << 8) | (unsigned int)mem[23];
+    if (mw != TEST_W || mh != TEST_H) {
+        free(mem);
+        return fail("in-memory PNG dimensions mismatch");
+    }
+    if (memcmp(mem + mem_len - 8, "IEND", 4) != 0) {
+        free(mem);
+        return fail("in-memory PNG missing IEND");
+    }
+    free(mem);
+
     printf("PNG_ROUNDTRIP_OK\n");
     return 0;
 }
