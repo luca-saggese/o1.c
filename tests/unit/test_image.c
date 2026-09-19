@@ -228,6 +228,51 @@ static void test_vlm_preprocess_oracle(void) {
     free(oracle);
 }
 
+static void test_ref_patch_oracle(void) {
+    FILE *f = fopen("/tmp/ref_patches_oracle.bin", "rb");
+    if (!f) return;
+    const size_t n = (size_t)1008 * 3072;
+    float *oracle = malloc(n * sizeof(float));
+    float *native = malloc(n * sizeof(float));
+    if (!oracle || !native ||
+        fread(oracle, sizeof(float), n, f) != n) {
+        fclose(f);
+        free(oracle);
+        free(native);
+        CHECK(0, "load reference patch oracle");
+        return;
+    }
+    fclose(f);
+
+    hd_image src = {0}, resized = {0};
+    hd_status st = hd_image_load("example_assets/edit/test.jpg", &src);
+    CHECK(st == HD_OK, "load edit reference for latent patches");
+    if (st == HD_OK) st = hd_image_resize(&src, 1024, 32, &resized);
+    hd_image_free(&src);
+    CHECK(st == HD_OK && resized.width == 896 && resized.height == 1152,
+          "resize edit reference for latent patches");
+    if (st == HD_OK) st = hd_image_to_patches(&resized, 32, native);
+    hd_image_free(&resized);
+    CHECK(st == HD_OK, "patchify edit reference latent");
+    if (st == HD_OK) {
+        double dot = 0.0, na = 0.0, nb = 0.0, err = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            double a = native[i] * 2.0 - 1.0;
+            double b = oracle[i];
+            double d = a - b;
+            dot += a * b;
+            na += a * a;
+            nb += b * b;
+            err += d * d;
+        }
+        double cos = dot / sqrt(na * nb);
+        double rel = sqrt(err / nb);
+        printf("  ref patches: cos=%.8f nrmse=%.8f\n", cos, rel);
+    }
+    free(oracle);
+    free(native);
+}
+
 int main(void) {
     test_calc_dims();
     test_resize();
@@ -235,6 +280,7 @@ int main(void) {
     test_png_roundtrip();
     test_keep_aspect();
     test_vlm_preprocess_oracle();
+    test_ref_patch_oracle();
 
     printf("\n%s\n", failures == 0 ? "ALL IMAGE TESTS PASSED" : "SOME FAILED");
     return failures == 0 ? 0 : 1;
