@@ -167,6 +167,11 @@ void hd_sched_z_next(const float *noise_dev, const float *denoised_dev,
 void hd_sched_vcond(const void *z_dev, const void *xp_dev, float sigma,
                     float *mo_dev, int n);
 
+/* FlowMatch Euler: z_next = z + (sigma_next - sigma) * model_output. */
+void hd_sched_flow_match_step(const void *z_dev, const float *mo_dev,
+                              float sigma, float sigma_next,
+                              void *z_next_dev, int n);
+
 /* ------------------------------------------------------------------ */
 /* CFG guidance combine (base "default" path)                          */
 /* ------------------------------------------------------------------ */

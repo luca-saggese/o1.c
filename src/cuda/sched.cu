@@ -61,6 +61,16 @@ __global__ void hd_vcond_kernel(const uint16_t *__restrict__ z,
     }
 }
 
+__global__ void hd_flow_match_step_kernel(
+        const uint16_t *__restrict__ z, const float *__restrict__ mo,
+        float dt, uint16_t *__restrict__ z_next, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float zf = hd_dev_bf16_to_f32(z[i]);
+        z_next[i] = hd_dev_f32_to_bf16(zf + dt * mo[i]);
+    }
+}
+
 void hd_sched_bf16_upcast(const void *in_dev, float *out_dev, int n) {
     if (!in_dev || !out_dev || n <= 0) {
         snprintf(hd_cuda_errbuf(), 512, "sched_bf16_upcast: bad args");
@@ -99,6 +109,18 @@ void hd_sched_vcond(const void *z_dev, const void *xp_dev, float sigma,
     }
     hd_vcond_kernel<<<(n + 255) / 256, 256>>>(
         (const uint16_t *)z_dev, (const uint16_t *)xp_dev, sigma, mo_dev, n);
+}
+
+void hd_sched_flow_match_step(const void *z_dev, const float *mo_dev,
+                              float sigma, float sigma_next,
+                              void *z_next_dev, int n) {
+    if (!z_dev || !mo_dev || !z_next_dev || n <= 0) {
+        snprintf(hd_cuda_errbuf(), 512, "sched_flow_match_step: bad args");
+        return;
+    }
+    float dt = sigma_next - sigma;
+    hd_flow_match_step_kernel<<<(n + 255) / 256, 256>>>(
+        (const uint16_t *)z_dev, mo_dev, dt, (uint16_t *)z_next_dev, n);
 }
 
 /* ------------------------------------------------------------------ */

@@ -166,6 +166,22 @@ int main(void) {
     CHECK(fabsf(got[0] - expect) < 1e-5f &&
           fabsf(got[N - 1] - expect) < 1e-5f, "cfg_guided combine correct");
 
+    /* ---- FlowMatch Euler sanity ---- */
+    for (int i = 0; i < N; i++) {
+        u0[i] = 0.25f;
+        u1[i] = -0.5f;
+    }
+    cudaMemcpy(cfg0, u0, (size_t)N * 4, cudaMemcpyHostToDevice);
+    hd_f32_convert_bf16((float *)cfg0, cfg1, N);
+    cudaMemcpy(cfg0, u1, (size_t)N * 4, cudaMemcpyHostToDevice);
+    hd_sched_flow_match_step(cfg1, (float *)cfg0, 0.9f, 0.7f, cfgout, N);
+    hd_sched_bf16_upcast(cfgout, (float *)cur, N);
+    copy_dev_to_host(cur, got, N);
+    expect = 0.25f + (0.7f - 0.9f) * -0.5f;
+    CHECK(fabsf(got[0] - expect) < 2e-3f &&
+          fabsf(got[N - 1] - expect) < 2e-3f,
+          "flow_match Euler step correct");
+
     dev_free(zdev); dev_free(modev); dev_free(cur); dev_free(corr_out);
     dev_free(prev_out); dev_free(hist); dev_free(last);
     dev_free(cfg0); dev_free(cfg1); dev_free(cfgout);
