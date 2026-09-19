@@ -59,7 +59,10 @@ void hd_request_defaults(hd_generation_request *req) {
         if (req->steps <= 0) req->steps = 28;
         if (req->guidance_scale < 0.0f) req->guidance_scale = 0.0f;
         if (req->shift < 0.0f) req->shift = 1.0f;
-        if (req->scheduler == HD_SCHED_DEFAULT) req->scheduler = HD_SCHED_FLASH;
+        if (req->scheduler == HD_SCHED_DEFAULT)
+            req->scheduler = req->mode == HD_MODE_EDIT
+                                 ? HD_SCHED_FLOW_MATCH
+                                 : HD_SCHED_FLASH;
     }
     if (req->noise_scale_start <= 0.0f) req->noise_scale_start = 8.0f;
     if (req->noise_scale_end <= 0.0f) req->noise_scale_end = 8.0f;
