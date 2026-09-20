@@ -52,6 +52,47 @@ int hd_sdpa_execute(hd_sdpa_plan *plan,
 /* Frees the plan and its workspace. */
 void hd_sdpa_destroy(hd_sdpa_plan *plan);
 
+/*
+ * Two-pass SDPA. Instead of one graph with a mixed additive bias, the query
+ * range is split at `ar_len`:
+ *
+ *   pass 1 (causal): Q[0:ar_len] against K/V[0:ar_len]
+ *   pass 2 (full):   Q[ar_len:seq] against K/V[0:seq]
+ *
+ * This is exactly equivalent to the masked single-graph form for the mask
+ * produced by hd_seq_t2i (rows >= text_len-1 are fully unmasked, earlier
+ * rows are causal). Both graphs are built here and only executed afterwards,
+ * so the repeated path performs no plan build, allocation or sync.
+ */
+int hd_sdpa_create_split(hd_sdpa_plan **out,
+                         int batch, int q_heads, int kv_heads,
+                         int seq, int ar_len, int head_dim,
+                         float scale);
+
+/* Runs both passes. q/k/v/out use the same [H,S,D] layout as
+ * hd_sdpa_execute; no mask is needed. Returns 0 on success. */
+int hd_sdpa_execute_split(hd_sdpa_plan *plan,
+                          const void *q, const void *k, const void *v,
+                          void *out, void *stream);
+
+/* Runs a single pass (0 = causal head, 1 = full tail) into the same output
+ * layout. For benchmarking/validation only. */
+int hd_sdpa_execute_split_pass(hd_sdpa_plan *plan, int which,
+                               const void *q, const void *k, const void *v,
+                               void *out, void *stream);
+
+/*
+ * Production entry point. Builds the split (two-pass) plan when
+ * 0 < ar_len < seq, otherwise falls back to the masked single-graph plan.
+ * Executed through the ordinary hd_sdpa_execute(), which dispatches to the
+ * two passes when the plan is split (the mask argument is then ignored,
+ * since the split reproduces the mask structurally).
+ */
+int hd_sdpa_create_prod(hd_sdpa_plan **out,
+                        int batch, int q_heads, int kv_heads,
+                        int seq, int ar_len, int head_dim,
+                        float scale);
+
 #ifdef __cplusplus
 }
 #endif

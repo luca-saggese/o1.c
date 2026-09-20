@@ -1057,8 +1057,13 @@ hd_status hd_engine_generate_t2i(hd_generation_engine *e,
         for (int b = 0; b < nbranch; b++) {
             hd_sdpa_plan *plan = NULL;
             int Ss = seq_S[b];
+            /* hd_seq_t2i's mask is causal on rows [0, text_len-1) and fully
+             * unmasked from text_len-1 onward, so the two-pass split at
+             * ar_len = text_len-1 is exactly equivalent. */
+            int ar_len = seq_text_len[b] - 1;
             float attn_scale = (float)(1.0 / sqrt((double)HD));
-            int rc = hd_sdpa_create(&plan, 1, NH, NKV, Ss, Ss, HD, attn_scale);
+            int rc = hd_sdpa_create_prod(&plan, 1, NH, NKV, Ss, ar_len,
+                                         HD, attn_scale);
             if (rc != 0) {
                 hd_set_error("generate: sdpa plan disabled (%s); using eager reference",
                              hd_cuda_errbuf());

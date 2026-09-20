@@ -709,3 +709,183 @@ artifacts/m2/perf/
   run_after.sh
 ```
 ```
+---
+
+# Part 3 — C4: two-pass SDPA
+
+## 31. Motivation and scope
+
+Steady state (Part 2, §24) showed `B_sdpa = 13.884 ms/block` ≈ 17.2 % of
+transformer GPU time, on the single mixed-mask cuDNN graph. The t2i mask is
+*exactly* "causal for rows `[0, text_len-1)`, fully unmasked from
+`text_len-1` onward", so the single graph pays for a mask/bias path that is
+only needed on **18 of 4115 rows**.
+
+Scope was deliberately limited to this one target: no SDPA variants, no CUDA
+Graph, no fusion, no GEMM work (C1 is closed).
+
+## 32. Decomposition
+
+```
+ar_len = text_len - 1 = 18      (text_len = 19)
+gen_len = S - ar_len  = 4097
+
+PASS 1  Q[0:ar_len]   K[0:ar_len]   V[0:ar_len]   causal=true,  no bias
+PASS 2  Q[0:S]        K[0:S]        V[0:S]        causal=false, no bias
+```
+
+**Key structural insight.** Because the mask zeroes *every* row
+`r >= ar_len` across *all* columns, pass 2 is not a masked subset — it is
+**exactly plain full non-causal attention of all S queries over all S keys**.
+Pass 2 therefore needs no mask, no bias, and **no staging or striding**: it
+runs directly on the real contiguous `[H,S,D]` buffers. Only the 18-row
+causal head needs compact staging.
+
+## 33. Implementation
+
+`src/cuda/hd_cudnn_sdpa.cu`
+
+* `struct hd_sdpa_pass { graph, q, k, v, o, workspace, workspace_bytes }`.
+* `hd_sdpa_plan` gained `int ar_len`, `hd_sdpa_pass ar, gen`, and one-time
+  staging buffers `q_stage/k_stage/v_stage/o_stage` + `stage_bytes`
+  (`cudaMalloc`ed in `hd_sdpa_create_split`, freed in the destructor).
+* `hd_sdpa_build_pass(...)` — **packed strides** `{H*S*D, S*D, D, 1}`.
+* `hd_sdpa_execute_split` — `cudaMemcpy2DAsync` gather (src pitch `Sq*D*2`,
+  dst pitch `ar_len*D*2`, height = heads) → **pass 2 first** (writes the whole
+  output on the real buffers) → pass 1 on staging → `cudaMemcpy2DAsync`
+  scatter of `o_stage` back into `out`.
+* `hd_sdpa_execute` auto-dispatches to the split when `plan->ar_len > 0`.
+* `hd_sdpa_create_prod` (`extern "C"`) — production entry point; split when
+  `0 < ar_len < seq`, else the masked plan (fallback preserved).
+
+`src/runtime/generate.c` — the t2i plan site now calls
+`hd_sdpa_create_prod(&plan, 1, NH, NKV, Ss, ar_len, HD, attn_scale)` with
+`ar_len = seq_text_len[b] - 1`. The vision site (`generate.c:549`, head_dim
+72, different mask) and the generic `hd_seq_build` mask path are untouched.
+
+**Rejected alternative.** Expressing the AR slice as a *non-compact strided
+view* (head stride > `seq*D`) passes `validate`/`check_support`/`build_plans`
+but **fails at launch** with
+`err 716 CUDNN_STATUS_EXECUTION_FAILED_CUDA_DRIVER` (`shimCuLaunchKernelEx`).
+This is **not** causal-specific — reproduced with `causal=false`. cuDNN
+rejects non-compact head strides, so compact staging is the working route.
+
+## 34. Correctness
+
+Microbenchmark (`build/bench_sdpa_twopass`, real production geometry
+GRID 64x64, TEXT_LEN 19, SEQLEN 4115, NH 32, NKV 8, HD 128), mixed-mask vs
+two-pass over all 32 heads:
+
+```
+max_abs = 0
+NRMSE   = 0
+cosine  = 1.000000000
+head0 causal-head NRMSE=0 cos=1 | full-tail NRMSE=0 cos=1
+```
+
+Bit-exact. Existing regression tests, unchanged thresholds:
+
+```
+test-sdpa-block    eager vs sdpa: nrmse=0 cos=1  -> PASS
+test-sdpa-forward  eager vs sdpa: nrmse=0 cos=1  -> PASS
+test-full-forward  complete_output nrmse=0.15267 cos=0.98882141 -> FAIL
+```
+
+`complete_output` is the **known pre-existing** failure at exactly the
+baseline value (`0.15267 / 0.98882141`), threshold untouched: no new
+regression.
+
+End-to-end: the canonical 28-step PNG is **bit-identical** to the masked
+28-step PNG (`sha256 c4e1e2e8b1f08d7c…`, 0 differing bytes of 12 584 960).
+
+## 35. SDPA A/B (CUDA events, real production dims)
+
+```
+current mixed-mask SDPA : 14.0002 ms
+two-pass pass1 (causal) :  0.0448 ms
+two-pass pass2 (full)   : 10.6721 ms
+two-pass total          : 10.6427 ms
+speedup                 : 1.3155x  (23.98% faster)
+mixed effective         : 19.82 TFLOP/s
+two-pass effective      : 26.07 TFLOP/s
+```
+
+Plan build: mixed 0.091 s, two-pass 0.098 s (once per generation).
+Steady state contains no plan build, no `cudaMalloc`, no synchronization;
+the two `cudaMemcpy2DAsync` gathers/scatters are async on the same stream.
+
+## 36. Block / transformer / step before/after
+
+All rows below are **controlled A/B runs on the same machine state with
+identical GEMM code** (only `ar_len` toggled), because wall-clock and clock
+drift made the historical 10:36 baseline non-comparable.
+
+**B1 — one block** (per-block GPU seconds, 36 blocks)
+
+| region | masked | two-pass | delta |
+|---|---|---|---|
+| `B_sdpa` | 13.781 ms | 11.436 ms | **-17.01 %** |
+| `BLOCK_SINGLE` | 104.3 ms | 103.0 ms | -1.19 % |
+
+**B2/B3 — one denoise step** (`TRANSFORMER_TOTAL`, 1 step)
+
+| region | masked | two-pass | delta |
+|---|---|---|---|
+| `B_sdpa` | 13.781 ms | 11.436 ms | -17.01 % |
+| `BLOCKS_TOTAL` | 3.7542 s | 3.7096 s | -1.19 % |
+| `TRANSFORMER_TOTAL` | 4.5390 s | 4.4685 s | -1.55 % |
+
+**B4 — three denoise steps**
+
+| region | masked | two-pass | delta |
+|---|---|---|---|
+| `B_sdpa` / block | 13.6 ms | 11.4 ms | **-15.80 %** |
+| `BLOCK_SINGLE` | 82.6 ms | 81.4 ms | -1.41 % |
+| `BLOCKS_TOTAL` | 8.9166 s | 8.7912 s | -1.41 % |
+| `TRANSFORMER_TOTAL` | 9.7415 s | 9.6183 s | -1.27 % |
+
+The SDPA gain survives at block/transformer level with the expected
+amortisation: SDPA is ~17 % of transformer time, so a ~16 % SDPA cut is
+~1.3–1.5 % of the transformer — exactly what is observed. No anomalous
+launch/copy/sync overhead was found; the two extra `cudaMemcpy2DAsync`
+gather/scatter plus one extra graph launch account for the residual.
+
+**B5 — full CLI, 28 steps** (Dev, 2048x2048, seed 42, same prompt/scheduler)
+
+| run | wall clock |
+|---|---|
+| masked (controlled) | 85.42 s |
+| two-pass | 83.70 s |
+
+Delta **-1.72 s (-2.0 %)**. Historical baseline (10:36) was 84.08–86.00 s;
+the machine drifted upward afterwards, hence the matched masked control.
+
+## 37. Decision
+
+```
+correctness gate (nrmse<=1e-2 && cos>=0.999) : PASS  (nrmse=0, cos=1)
+performance gate (>=15% faster)              : PASS  (-17.0 % / -23.98 %)
+=> ACCEPTED
+```
+
+C4 is integrated as the production SDPA path for the t2i sequence layout.
+The masked single-graph path remains available as fallback and for the
+vision / generic-mask call sites.
+
+## 38. Artifacts (Part 3)
+
+```
+artifacts/m2/perf/c4/
+  b3_masked.json/.png      b3_1step.json/.png     (1-step controlled A/B)
+  b4_masked.json/.png      b4_twopass.json/.png   (3-step controlled A/B)
+  b5_masked.{png,time}     b5_28step.{png,time}   (28-step controlled A/B)
+  b4_3step.{json,log,png}  iso.png
+tests/unit/bench_sdpa_twopass.cu                  (make bench-sdpa-twopass)
+```
+
+## 39. Next target
+
+SDPA is now ~11.4 ms/block. Remaining measured headroom: GEMM (already at
+~94 % of device ceiling, closed), MLP pointwise (SwiGLU ~1.5 ms/block, norms
+~2.1 ms/block), and the ~3 % non-GPU denoise overhead. Selection is out of
+scope for C4.

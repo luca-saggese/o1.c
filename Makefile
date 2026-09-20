@@ -53,6 +53,9 @@ TEST_SDPA_FWD_BIN := build/test_sdpa_forward
 TEST_SDPA_FWD_SRCS := tests/unit/test_sdpa_forward.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_SDPA_FWD_OBJS := $(TEST_SDPA_FWD_SRCS:.c=.o)
 
+BENCH_SDPA2_BIN := build/bench_sdpa_twopass
+BENCH_SDPA2_SRCS := tests/unit/bench_sdpa_twopass.cu src/runtime/sequence.c $(CORE_SRCS)
+BENCH_SDPA2_OBJS := tests/unit/bench_sdpa_twopass.o
 BENCH_BLOCK_BIN := build/bench_block
 BENCH_BLOCK_SRCS := tests/unit/bench_block.c src/model/block.c $(CORE_SRCS) src/model/weights.c
 BENCH_BLOCK_OBJS := $(BENCH_BLOCK_SRCS:.c=.o)
@@ -367,6 +370,13 @@ $(BENCH_BLOCK_BIN): $(BENCH_BLOCK_OBJS) $(CUDA_OBJS)
 bench-block: $(BENCH_BLOCK_BIN)
 	LD_LIBRARY_PATH="$(CUDNN_HOME)/lib:$$LD_LIBRARY_PATH" ./$(BENCH_BLOCK_BIN)
 
+$(BENCH_SDPA2_BIN): $(BENCH_SDPA2_OBJS) $(CUDA_OBJS) src/runtime/sequence.o src/model/tokenizer.o $(CORE_SRCS:.c=.o)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(BENCH_SDPA2_OBJS) src/runtime/sequence.o src/model/tokenizer.o $(CORE_SRCS:.c=.o) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+bench-sdpa-twopass: $(BENCH_SDPA2_BIN)
+	LD_LIBRARY_PATH="$(CUDNN_HOME)/lib:$$LD_LIBRARY_PATH" ./$(BENCH_SDPA2_BIN)
+
 $(BENCH_GEMM_BIN): $(BENCH_GEMM_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(BENCH_GEMM_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
@@ -497,7 +507,7 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity test-server test-engine server clean timing timing-block bench-gemm
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity test-server test-engine server clean timing timing-block bench-gemm bench-sdpa-twopass
 # Base FlowUniPC CUDA kernel validation (M-post base default path).
 TEST_BUNIPC_BIN := build/test_base_unipc_cuda
 TEST_BUNIPC_SRCS := tests/unit/test_base_unipc_cuda.c src/model/scheduler.c $(CORE_SRCS)
@@ -507,3 +517,9 @@ test-base-unipc: $(TEST_BUNIPC_BIN)
 $(TEST_BUNIPC_BIN): $(TEST_BUNIPC_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_BUNIPC_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+# C4 two-pass SDPA A/B harness (CUDA TU: needs the driver header and the
+# vendored cuDNN frontend include path).
+tests/unit/bench_sdpa_twopass.o: tests/unit/bench_sdpa_twopass.cu
+	@mkdir -p $(dir $@)
+	$(NVCC) -arch=sm_121 -O2 -std=c++17 $(CPPFLAGS) $(CUDA_CPPFLAGS) $(CUDNN_CPPFLAGS) -c -o $@ $<
