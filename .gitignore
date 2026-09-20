@@ -18,6 +18,7 @@
 # --- Build output ---
 /build/
 *.o
+*.d
 *.so
 *.a
 *.cu.o
