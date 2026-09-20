@@ -889,3 +889,265 @@ SDPA is now ~11.4 ms/block. Remaining measured headroom: GEMM (already at
 ~94 % of device ceiling, closed), MLP pointwise (SwiGLU ~1.5 ms/block, norms
 ~2.1 ms/block), and the ~3 % non-GPU denoise overhead. Selection is out of
 scope for C4.
+
+---
+
+# Part 4 — Native EDIT path
+
+Scope: the **native CLI edit path** (`hidream_timing_block --mode edit`), not the
+server. Canonical workload:
+
+```
+Dev edit / 2048x2048 target / 1x 2048x2048 reference / 28 steps / FlowMatch
+seed 42 / prompt "Place the person in a snowy mountain landscape"
+```
+
+## 40. Canonical command
+
+```
+export LD_LIBRARY_PATH=/home/lvx/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+O1_TIMING_JSON=artifacts/m2/edit/final.json \
+./build/hidream_timing_block --mode edit \
+  --ref-image _reference2/HiDream-O1-Image/assets/edit/test.jpg \
+  --width 2048 --height 2048 --steps 28 --seed 42 \
+  --prompt "Place the person in a snowy mountain landscape" \
+  --output artifacts/m2/edit/final.png
+```
+
+Output SHA-256 `21ca624be8e41dbea30d2c4128ad1eeaa11fd99a6d067a9f544d77fe57a58464`
+(reproducible run-to-run).
+
+## 41. Edit geometry (measured, one canonical run)
+
+```
+target_img_tokens    4096      (64x64 patch grid)
+ref_pixel_tokens     4032
+total_img            8128
+text_len              150
+S                    8278
+vlm_N (raw)           520
+vlm_V (merged)        130
+forward_workspace     10 559 525 376 B
+decoder_scratch       10 220 747 520 B
+mask                  137 050 568 B
+```
+
+Attention backends:
+
+```
+main decoder : CUDNN_SDPA   1008/1008 calls  (0 eager fallback)
+vision tower : CUDNN_SDPA     27/27   calls  (0 eager fallback)
+```
+
+## 42. Complete edit time decomposition
+
+`TOTAL_PROCESS = 208.145 s`.
+
+```
+MODEL_LOAD              21.741 s   (CPU; must not be counted as inference)
+FILE_READ               14.524 s   (CPU, 759 tensors, 35.2 GB, 2.425 GB/s)
+CUDA_ALLOC               1.823 s
+REF_PREPROCESS           1.041 s
+PROMPT_TOKENIZE          0.166 s
+INITIAL_NOISE            0.272 s
+INPUT_PREPARE            3.935 s
+DENOISE_TOTAL          180.195 s
+OUTPUT_RECONSTRUCTION    0.141 s
+IMAGE_ENCODE_WRITE       0.332 s
+REQUEST_TOTAL          207.795 s
+TOTAL_PROCESS          208.145 s
+```
+
+One-shot vision (inside `INPUT_PREPARE`):
+
+```
+VISION_TOTAL             0.7777 s   = 0.37 % of TOTAL_PROCESS
+  VISION_PATCH_EMBED     0.5301 s   (cold; includes one-time GEMM tuning — see 43)
+  VISION_PREPROCESS      0.0004 s
+  VISION_27_BLOCKS       0.2465 s
+  VISION_DEEPSTACK_MERG  0.0358 s
+  VISION_FINAL_MERGER    0.0007 s
+```
+
+Vision 27-block aggregate (0.2465 s):
+
+```
+LayerNorm              0.0014 s
+QKV GEMM               0.1176 s
+RoPE/split/merge       0.0025 s
+SDPA                   0.0073 s
+O projection           0.0105 s
+FC1                    0.0494 s
+GELU                   0.0020 s
+FC2                    0.0191 s
+copies/residual        0.0366 s (residual)
+```
+
+Repeated denoise (28 steps):
+
+```
+DENOISE_TOTAL          180.195 s
+MEAN_DENOISE_STEP        6.434 s
+TRANSFORMER_PER_STEP     6.434 s
+BLOCKS_TOTAL           179.247 s
+SCHEDULER total          0.0140 s  (0.0005 s/step)
+FINAL_NORM_HEAD          0.4985 s
+EMBEDDING                0.3897 s  (E_xembed 0.1887 s)
+```
+
+## 43. Patch-embed measurement caveat
+
+`VISION_PATCH_EMBED` = 0.5301 s in the canonical run vs 0.0305 s in the
+pre-Phase-4 baseline. The new patch-embed shape `520x1152x1536` is unseen by the
+cuBLASLt tuner, so the first `hd_linear` on it pays a one-time tuning cost that
+lands **inside** the timed region.
+
+```
+cold            = 0.5301 s
+steady state    = 0.0305 s  (0.125 ms/call x 1 call region-equivalent)
+measurement includes possible one-time GEMM tuning
+```
+
+Not investigated further: patch embed is 0.25 % of total edit runtime.
+
+## 44. Vision hot-path defects fixed
+
+1. **cuDNN vision SDPA was silently falling back to eager.** `hd_sdpa_create`
+   always attaches an additive bias tensor, but `hd_sdpa_execute` binds
+   `plan->bias` only `if (mask)`. The vision caller passed `mask = NULL` →
+   unbound tensor → cuDNN error → eager fallback on all 27 blocks. Fix: pass the
+   (zeroed) mask. `VIS_SDPA_CUDNN` 0 → 27.
+2. Production `CUDA_STAGE_CHECK` / `cudaDeviceSynchronize` removed from
+   `hd_vision_forward`.
+3. No `cudaMalloc`/`cudaFree` inside `hd_vision_forward`.
+4. No H2D construction of pos-interp/rotary tables inside the forward — moved to
+   persistent device storage built once by `hd_vision_prepare_tables()`
+   (`ws->pos_idx/pos_wgt/rot_coords/rot_inv`).
+5. Vision SDPA plan cached by actual N.
+6. Eager attention mask memset skipped when cuDNN vision SDPA is active.
+7. Scalar `hd_vision_patch_kernel` replaced by the production GEMM backend
+   (`hd_linear`, `X[n,1536] x W[1152,1536]^T + bias`, bf16 in/out, fp32 acc).
+   Old kernel preserved behind `HD_VISION_PATCH_REF=1` for reference/A-B.
+
+Vision before → after (GPU seconds):
+
+```
+                     before    after
+VISION_TOTAL         0.7991    0.7777
+VISION_27_BLOCKS     0.7676    0.2465   (-67.9 %)
+V_b_qkv_gemm         0.5255    0.1176   (-77.6 %)
+V_b_fc1              0.1576    0.0494   (-68.7 %)
+V_b_sdpa             0.0079    0.0073
+V_b_layernorm        0.0015    0.0014
+V_b_o_proj           0.0110    0.0105
+```
+
+## 45. x_embedder reference-embedding cache
+
+Confirmed: every denoise step recomputed `x_embedder(target z + static
+ref_patches)` over all 8128 rows, although the 4032 reference rows are constant
+across steps. Implemented one-time `ref_emb = x_embedder(ref_patches)` plus a
+per-step `target_emb = x_embedder(z)` and concatenation.
+
+```
+E_xembed    0.7802 -> 0.1887 s   (-75.8 %)
+```
+
+Correctness: bit-exact in both backends (probe: `differing=0/33292288` reference,
+`differing=0/16777216` production). The cache is hash-neutral — three same-binary
+A/B runs (cache ON / `O1_XE_FULL=1` / `O1_XE_NOCACHE=1`) all produced the
+identical PNG.
+
+## 46. Output-hash change and its root cause
+
+The final PNG changed (`3a037834…` → `21ca624b…`) after this work. Root cause is
+the **patch-embed GEMM replacement**, not the x_embedder cache:
+
+```
+HD_VISION_PATCH_REF=1 (scalar kernel) -> b7784b7c…   (= baseline hash)
+patch-embed GEMM (production)         -> 21ca624b…   (independent of cache on/off/full)
+```
+
+The GEMM patch embed has a tiny per-element error (`cos=1.000000`,
+`nrmse=0.000117`) which is chaotically amplified across 28 diffusion steps.
+The GEMM path is numerically *better* against the oracle and passes
+`make test-vision` 9/9; the output change is expected and documented.
+
+## 47. Makefile header-dependency fix (build correctness)
+
+`make test-sdpa-forward` appeared to regress to 2/4 (`block: scratch too small`).
+Root cause was **not** a Phase-4 code defect: the Makefile had no header
+dependency tracking, so `tests/unit/test_sdpa_forward.o` and `src/model/block.o`
+were stale objects compiled against the pre-`xe_ref` `forward.h`. `block_scratch_bytes`
+had shifted offset, so the test wrote it to the old offset and the block read 24
+instead of 4 095 360.
+
+Fix: `-MMD -MP` on all compile rules plus `-include` of the generated `.d` files;
+`*.d` added to `.gitignore`. Clean rebuild → **4/4 PASS**; touching `forward.h`
+now correctly triggers a recompile.
+
+## 48. Correctness ladder (all green)
+
+```
+make test-vision        9 passed, 0 failed
+make test-sdpa-block    4 assertions passed, 0 failed
+make test-sdpa-forward  4 assertions passed, 0 failed
+make test-gemm-smoke    builds OK
+make test-full-forward  complete_output nrmse=0.15267 (known pre-existing, unchanged)
+patch_embed             cos=1.000000 nrmse=0.000117
+```
+
+## 49. Edit block profile (GPU, 1008 calls, 177.77 ms/block)
+
+```
+region            total s   % block   % denoise
+B_sdpa            56.4711    31.51     31.34
+B_mlp_gate_up     56.8261    31.71     31.54
+B_mlp_down        27.9232    15.58     15.50
+B_qkv_proj        14.7708     8.24      8.20
+B_o_proj           9.3578     5.22      5.19
+B_swiglu           3.0987     1.73      1.72
+B_qk_norm          3.0153     1.68      1.67
+B_head_split       1.9554     1.09      1.09
+B_rope             1.9103     1.07      1.06
+B_mlp_resid        0.9792     0.55      0.54
+B_attn_resid       0.9786     0.55      0.54
+B_post_norm        0.6109     0.34      0.34
+B_input_norm       0.6098     0.34      0.34
+B_final_copy       0.5752     0.32      0.32
+B_mrope            0.0864     0.05      0.05
+```
+
+GEMM share: `B_mlp_gate_up + B_mlp_down + B_qkv_proj + B_o_proj` = 108.878 s =
+**60.7 % of denoise**. SDPA = 31.3 %.
+
+## 50. Edit decoder SDPA is NOT on the C4 two-pass path
+
+`hd_engine_generate_ref` (generate.c:218) builds its attention plan with the
+legacy single masked graph:
+
+```c
+hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);   /* generate.c:671 */
+```
+
+C4's two-pass `hd_sdpa_create_prod(..., ar_len, ...)` is used only by
+`hd_engine_generate_t2i` (generate.c:1125). The edit mask is more complex than
+the t2i mask — token rows are types 1 (target), 2 (reference) and 3 (tms), each
+fully unmasked, interleaved with text rows that are causal — so the simple
+`ar_len = text_len - 1` split does not apply as-is. The edit path therefore
+pays the full masked-graph cost: 56.47 s of SDPA, the single largest edit
+region.
+
+## 51. Decision
+
+```
+VISION_TOTAL = 0.7777 s = 0.37 % of TOTAL_PROCESS  (threshold 10 %)
+=> STOP vision optimization.  No LayerNorm/GELU fusion.
+decoder attention = CUDNN_SDPA, no eager fallback  => no emergency.
+```
+
+**Largest remaining edit bottleneck: the masked single-graph decoder SDPA
+(56.47 s, 31.3 % of denoise)** — the edit path never received C4. GEMMs remain
+the larger aggregate at 60.7 % but are already at the device ceiling (Part 2)
+and are closed. Next target candidate: extend the two-pass SDPA split to the
+edit mask structure.
