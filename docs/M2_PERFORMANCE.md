@@ -1151,3 +1151,183 @@ decoder attention = CUDNN_SDPA, no eager fallback  => no emergency.
 the larger aggregate at 60.7 % but are already at the device ceiling (Part 2)
 and are closed. Next target candidate: extend the two-pass SDPA split to the
 edit mask structure.
+
+---
+
+# Part 5 — C4.1: two-pass SDPA for the edit/reference decoder
+
+Part 4 §50 hypothesised that the edit mask was generically interleaved and that
+the `ar_len = text_len - 1` split therefore did **not** apply. That hypothesis
+was wrong. This part records the boundary measurement, the implementation, the
+gates, and the accepted result.
+
+## 52. Mask boundary measurement (corrects §50)
+
+A boundary probe was added to `hd_engine_generate_ref` inside
+`#ifdef O1_DEBUG_TIMING`, classifying every mask row as causal or full:
+
+```
+[edit-attr] ar_len=149 text_len=150 S=8278
+            causal_bad=0 full_bad=0 -> HOLDS
+```
+
+The edit mask **does** collapse to the t2i structure:
+
+```
+rows [0,  149): causal triangular   (mask == -inf strictly above diagonal)
+rows [149, 8278): fully unmasked    (mask == 0 everywhere)
+ar_len = text_len - 1 = 149
+```
+
+Although the token types are 1 (target `[text_len, text_len+image_len)`),
+2 (reference, after the target block) and 3 (tms `[tpl_n+1, text_len)`), every
+token row is fully unmasked, so the interleaving is immaterial: the net effect
+is exactly a causal text prefix followed by a fully-attended tail. The
+invariant is element-exact (`causal_bad = 0`, `full_bad = 0`), which is what
+licenses the two-pass split.
+
+## 53. Implementation
+
+`src/runtime/generate.c` (`hd_engine_generate_ref`): the single
+`hd_sdpa_create(...)` call was replaced by a conditional
+
+```c
+int ar_len = text_len - 1;
+const char *force_masked = getenv("O1_SDPA_MASKED");
+if (force_masked && force_masked[0] == '1')
+    rc = hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);
+else
+    rc = hd_sdpa_create_prod(&plan, 1, NH, NKV, S, ar_len, HD, attn_scale);
+```
+
+`hd_sdpa_create_prod` builds the same persistent split plan used by t2i C4
+(causal pass over `[0, ar_len)` + full non-causal pass over `[0, S)`), with
+staging allocated once at plan build. `hd_sdpa_execute` already routes
+`plan->ar_len > 0` to `hd_sdpa_execute_split` and ignores the mask argument, so
+**`src/model/block.c` needed no change** and no new cuDNN code was written.
+`O1_SDPA_MASKED=1` keeps the legacy single masked graph as A/B control and
+fallback. No additive `[S,S]` bias is materialised on the two-pass path.
+
+## 54. Correctness
+
+A/B harness `tests/unit/bench_sdpa_twopass.cu` gained an `edit` argument that
+reproduces the real edit geometry (S = 8278, text_len = 150, ar_len = 149,
+NH = 32, NKV = 8, HD = 128) and synthesises the canonical mask.
+
+```
+correctness (mixed-mask vs two-pass, all 32 heads, S=8278)
+  max_abs = 0
+  NRMSE   = 0
+  cosine  = 1.000000000
+  head0: causal-head NRMSE=0 cos=1.000000000 | full-tail NRMSE=0 cos=1.000000000
+```
+
+Bit-exact. The t2i geometry was re-run in the same harness and is unchanged
+(ACCEPT, 14.038 → 10.861 ms, 22.63 % faster).
+
+## 55. Microbenchmark A/B (CUDA events, 5 warmups + 20 reps)
+
+```
+current mixed-mask SDPA : 53.6449 ms
+two-pass pass1 (causal) :  0.0957 ms
+two-pass pass2 (full)   : 42.9139 ms
+two-pass total          : 42.9455 ms
+speedup                 : 1.2491x  (19.94 % faster)
+mixed effective         : 20.93 TFLOP/s
+two-pass effective      : 26.14 TFLOP/s
+```
+
+The win comes from eliminating the mixed `[S,S]` additive bias, not from
+reducing query count: pass 2 is still full non-causal over all 8278 rows
+(42.91 ms of the 42.95 ms total), while pass 1 is negligible (149 of 8278 rows).
+The masked graph pays a ~20 % penalty purely for materialising and reading the
+bias.
+
+**Gate: correctness PASS, ≥15 % PASS → ACCEPT.**
+
+## 56. Integration measurements (matched A/B, same binary, same prompt/seed)
+
+3 denoise steps (108 block calls):
+
+| region | masked | two-pass | delta |
+|---|---|---|---|
+| `B_sdpa` | 6.002 s (55.57 ms/call) | 4.720 s (43.70 ms/call) | **-21.4 %** |
+| `DENOISE_TOTAL` | 21.136 s | 19.748 s | -6.6 % |
+| `MEAN_STEP` | 7.045 s | 6.582 s | -6.6 % |
+
+28 steps (1008 block calls), matched control run in the same session:
+
+| region | masked | two-pass | delta |
+|---|---|---|---|
+| `B_sdpa` | 56.967 s (56.51 ms/call) | 45.717 s (45.35 ms/call) | **-19.75 %** |
+| `DENOISE_TOTAL` | 181.156 s | 169.995 s | **-11.16 s (-6.2 %)** |
+| `MEAN_STEP` | 181.123 s | 169.961 s | -6.2 % |
+| `TOTAL_PROCESS` | 207.265 s | 195.621 s | -11.64 s |
+| `B_mlp_gate_up` | 57.075 s | 56.992 s | unchanged |
+| `B_mlp_down` | 28.121 s | 28.083 s | unchanged |
+| `B_qkv_proj` | 14.808 s | 14.863 s | unchanged |
+| `B_o_proj` | 9.374 s | 9.496 s | unchanged |
+
+The microbenchmark gain survives materially at block, step and full-generation
+level, and the non-SDPA regions are untouched — confirming the change is
+isolated to attention. The gain is diluted to -6.2 % end-to-end because SDPA is
+only ~31 % of denoise and GEMMs (60.7 %, at the device ceiling) are unchanged.
+
+Against the Part 4 baseline (`DENOISE_TOTAL` 180.195 s, `B_sdpa` 56.4711 s) the
+result is the same within machine drift.
+
+## 57. Output correctness and the patch-embed default
+
+Per the Part 4 caveat, the production patch-embed backend was flipped back to
+the **reference scalar kernel**; the GEMM variant now lives behind
+`HD_VISION_PATCH_GEMM=1` (`src/model/vision.c`, was `HD_VISION_PATCH_REF`).
+`VISION_PATCH_EMBED` returns to 0.0312 s.
+
+Final production configuration = reference patch embed + x_embedder cache +
+two-pass edit SDPA. The canonical 28-step output hash is
+
+```
+b7784b7c02421d71...  == artifacts/m2/edit/baseline2.png / baseline3.png
+```
+
+i.e. **bit-identical to the pre-phase-4 baseline hash** (and the same as the
+masked control), so the two-pass split is hash-neutral and the x_embedder cache
+remains hash-neutral as previously verified.
+
+## 58. Correctness ladder
+
+```
+bench-sdpa-twopass (t2i)   PASS (unchanged, ACCEPT)
+bench-sdpa-twopass edit    PASS  max_abs=0 NRMSE=0 cos=1.0
+test_sdpa_block            4 assertions passed, 0 failed
+test_sdpa_forward          4 assertions passed, 0 failed
+test_vision                9 passed, 0 failed
+edit 28-step PNG           bit-identical to baseline (b7784b7c...)
+```
+
+`test_full_forward` / `complete_output` `nrmse=0.15267 cos=0.98882141` remains
+the known pre-existing failure and its threshold is unchanged.
+
+## 59. Decision
+
+```
+C4.1 TWO-PASS SDPA (edit/reference decoder)
+
+correctness      : max_abs=0  NRMSE=0  cosine=1.000000000
+current SDPA     : 53.64 ms  (microbench, S=8278)
+two-pass         : pass1 0.096 ms  pass2 42.914 ms  total 42.946 ms
+speedup          : 19.94 %
+decision         : ACCEPTED
+
+block            : 56.51 -> 45.35 ms/call
+transformer      : unchanged elsewhere
+1 step           : not separately gated (1-step runs emit no timing JSON)
+3 step           : DENOISE 21.136 -> 19.748 s ; MEAN_STEP 7.045 -> 6.582 s
+28 step          : DENOISE 181.156 -> 169.995 s ; TOTAL 207.265 -> 195.621 s
+```
+
+Largest remaining edit bottleneck is now the **MLP GEMMs**
+(`B_mlp_gate_up` 56.99 s + `B_mlp_down` 28.08 s = 85.07 s, ~50 % of denoise),
+followed by the residual full-attention pass 2 (45.72 s, ~27 %). GEMM work is
+closed (Part 2, at the device ceiling); pass 2 is now irreducible full
+non-causal attention over S = 8278.

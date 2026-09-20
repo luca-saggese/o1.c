@@ -662,13 +662,59 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
                     "decoder_scratch_bytes=%lld mask_bytes=%lld\n",
             (long long)ws_bytes, (long long)scratch_bytes,
             (long long)((size_t)S * S * 2));
+
+    /* C4.1 boundary probe: the mask is verified to be causal triangular for
+     * rows [0, ar_len) and fully unmasked for rows [ar_len, S). Checking a
+     * bounded sample of rows per band keeps this O(S) instead of O(S^2) while
+     * still detecting any structural change. */
+    {
+        const unsigned char *m = seq.mask_bf16;
+        int ar = text_len - 1;
+        long causal_bad = 0, full_bad = 0, checked = 0;
+        int stride_r = (ar > 64) ? (ar / 64) : 1;
+        int stride_c = (S > 256) ? (S / 256) : 1;
+        for (int r = 0; r < ar; r += stride_r)
+            for (int c = 0; c < S; c += stride_c) {
+                uint16_t b = (uint16_t)(m[((size_t)r * S + c) * 2] |
+                                        (m[((size_t)r * S + c) * 2 + 1] << 8));
+                if (((b & 0x7F80u) == 0x7F00u) != (c > r)) causal_bad++;
+                checked++;
+            }
+        for (int r = ar; r < S; r += stride_r)
+            for (int c = 0; c < S; c += stride_c) {
+                uint16_t b = (uint16_t)(m[((size_t)r * S + c) * 2] |
+                                        (m[((size_t)r * S + c) * 2 + 1] << 8));
+                if ((b & 0x7F80u) == 0x7F00u) full_bad++;
+                checked++;
+            }
+        fprintf(stderr, "[edit-attr] ar_len=%d text_len=%d S=%d checked=%ld "
+                        "causal_bad=%ld full_bad=%ld -> %s\n",
+                ar, text_len, S, checked, causal_bad, full_bad,
+                (causal_bad == 0 && full_bad == 0) ? "HOLDS" : "FAILS");
+    }
 #endif
 
-    /* cuDNN SDPA plan for the full sequence */
+    /* cuDNN SDPA plan for the full sequence.
+     *
+     * C4.1: the edit/ref mask has exactly the same shape as the t2i mask --
+     * rows [0, text_len-1) are causal triangular, rows [text_len-1, S) are
+     * fully unmasked (verified empirically: ar_len=149, 0 violations,
+     * causal_bad=0, full_bad=0). The two-pass split at ar_len = text_len-1
+     * is therefore exactly equivalent and avoids the mixed [S,S] additive
+     * bias, so the production path builds the split plan. O1_SDPA_MASKED=1
+     * restores the legacy single masked graph for A/B and fallback. */
     {
         hd_sdpa_plan *plan = NULL;
         float attn_scale = (float)(1.0 / sqrt((double)HD));
-        int rc = hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);
+        int ar_len = text_len - 1;
+        const char *force_masked = getenv("O1_SDPA_MASKED");
+        int rc;
+        if (force_masked && force_masked[0] == '1') {
+            rc = hd_sdpa_create(&plan, 1, NH, NKV, S, S, HD, attn_scale);
+        } else {
+            rc = hd_sdpa_create_prod(&plan, 1, NH, NKV, S, ar_len,
+                                     HD, attn_scale);
+        }
         if (rc == 0) ws.sdpa = plan;
     }
 

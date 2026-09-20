@@ -403,19 +403,22 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
 
     O1_TIMING_BEGIN_GPU("VISION_TOTAL");
     /* ---- stage D: patch_embed ----
-     * Production path: the Conv3d-as-matmul patch embedding runs through the
-     * shared production GEMM backend (X[n,1536] x W[1152,1536]^T + bias,
-     * bf16 in/out, fp32 accumulate). HD_VISION_PATCH_REF=1 keeps the old
-     * scalar reference kernel for A/B validation. */
+     * Production default is the scalar reference kernel, which reproduces the
+     * baseline output hash exactly. The Conv3d-as-matmul variant routes the
+     * same op through the shared production GEMM backend
+     * (X[n,1536] x W[1152,1536]^T + bias, bf16 in/out, fp32 accumulate); it is
+     * numerically equivalent (cos=1.0, nrmse=1.17e-4) and faster in steady
+     * state, but it perturbs the final PNG, so it stays behind the
+     * experimental HD_VISION_PATCH_GEMM=1 flag. */
     O1_TIMING_BEGIN_GPU("VISION_PATCH_EMBED");
     {
-        const char *ref = getenv("HD_VISION_PATCH_REF");
-        if (ref && strcmp(ref, "1") == 0)
-            hd_vision_patch(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
-                            patch_out, n, HD_VISION_PATCH_DIM, H);
-        else
+        const char *gemm = getenv("HD_VISION_PATCH_GEMM");
+        if (gemm && strcmp(gemm, "1") == 0)
             hd_linear(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
                       patch_out, n, H, HD_VISION_PATCH_DIM, 1);
+        else
+            hd_vision_patch(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
+                            patch_out, n, HD_VISION_PATCH_DIM, H);
     }
     O1_TIMING_END_GPU("VISION_PATCH_EMBED");
 
