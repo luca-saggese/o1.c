@@ -41,6 +41,22 @@ void o1_timing_report(const char *json_path);
 #define O1_TIMING_COUNTER_ADD(name, value) o1_timing_counter_add(name, value)
 #define O1_TIMING_COUNTER_SET(name, value) o1_timing_counter_set(name, value)
 
+/*
+ * Fine-grained decoder-block sub-stage timing. Gated separately from
+ * O1_DEBUG_TIMING because it records ~20 CUDA event pairs per block
+ * invocation (36 blocks x 28 steps = ~20k pairs), which is acceptable for
+ * the B1-B4 microbenchmarks but adds measurable host overhead to a full
+ * end-to-end run. Enable with -DO1_DEBUG_BLOCK_TIMING (implies
+ * -DO1_DEBUG_TIMING).
+ */
+#ifdef O1_DEBUG_BLOCK_TIMING
+#define O1_BTIMING_BEGIN_GPU(name) o1_timing_begin_gpu(name)
+#define O1_BTIMING_END_GPU(name) o1_timing_end_gpu(name)
+#else
+#define O1_BTIMING_BEGIN_GPU(name) ((void)0)
+#define O1_BTIMING_END_GPU(name) ((void)0)
+#endif
+
 #else /* !O1_DEBUG_TIMING */
 
 #define O1_TIMING_BEGIN(name) ((void)0)
@@ -51,6 +67,8 @@ void o1_timing_report(const char *json_path);
 #define O1_TIMING_ADD_GPU(name, value) ((void)0)
 #define O1_TIMING_COUNTER_ADD(name, value) ((void)0)
 #define O1_TIMING_COUNTER_SET(name, value) ((void)0)
+#define O1_BTIMING_BEGIN_GPU(name) ((void)0)
+#define O1_BTIMING_END_GPU(name) ((void)0)
 
 #endif /* O1_DEBUG_TIMING */
 

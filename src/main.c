@@ -470,7 +470,10 @@ int main(int argc, char **argv) {
         O1_TIMING_END("MODEL_STARTUP");
         O1_TIMING_END("TOTAL_PROCESS");
 #ifdef O1_DEBUG_TIMING
-        o1_timing_report("artifacts/m2/prebaseline/native_timing.json");
+        {
+            const char *tp = getenv("O1_TIMING_JSON");
+            o1_timing_report(tp ? tp : "artifacts/m2/prebaseline/native_timing.json");
+        }
 #endif
 
         printf("PASS: generation %s (%dx%d)\n", output, ow, oh);

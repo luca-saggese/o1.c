@@ -27,8 +27,8 @@
 #include <string.h>
 #include <time.h>
 
-#define O1_TIMING_MAX_REGIONS 64
-#define O1_TIMING_MAX_EVENTS 4096
+#define O1_TIMING_MAX_REGIONS 128
+#define O1_TIMING_MAX_EVENTS 65536
 
 typedef struct {
     const char *name;

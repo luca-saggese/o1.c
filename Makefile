@@ -57,6 +57,10 @@ BENCH_BLOCK_BIN := build/bench_block
 BENCH_BLOCK_SRCS := tests/unit/bench_block.c src/model/block.c $(CORE_SRCS) src/model/weights.c
 BENCH_BLOCK_OBJS := $(BENCH_BLOCK_SRCS:.c=.o)
 
+BENCH_GEMM_BIN := build/bench_gemm
+BENCH_GEMM_SRCS := tests/unit/bench_gemm.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
+BENCH_GEMM_OBJS := $(BENCH_GEMM_SRCS:.c=.o)
+
 TEST_FF_BIN := build/test_full_forward
 TEST_FF_SRCS := tests/unit/test_full_forward.c src/model/block.c src/model/forward.c $(CORE_SRCS) src/model/weights.c
 TEST_FF_OBJS := $(TEST_FF_SRCS:.c=.o)
@@ -363,6 +367,13 @@ $(BENCH_BLOCK_BIN): $(BENCH_BLOCK_OBJS) $(CUDA_OBJS)
 bench-block: $(BENCH_BLOCK_BIN)
 	LD_LIBRARY_PATH="$(CUDNN_HOME)/lib:$$LD_LIBRARY_PATH" ./$(BENCH_BLOCK_BIN)
 
+$(BENCH_GEMM_BIN): $(BENCH_GEMM_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -o $@ $(BENCH_GEMM_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
+
+bench-gemm: $(BENCH_GEMM_BIN)
+	LD_LIBRARY_PATH="$(CUDNN_HOME)/lib:$$LD_LIBRARY_PATH" ./$(BENCH_GEMM_BIN)
+
 $(TEST_FF_BIN): $(TEST_FF_OBJS) $(CUDA_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -o $@ $(TEST_FF_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++
@@ -418,6 +429,20 @@ $(TIMING_BIN): $(TIMING_OBJS) $(CUDA_OBJS)
 
 timing: $(TIMING_BIN)
 
+# M2 block-level timing: same as `timing` plus per-block sub-stage CUDA
+# events (-DO1_DEBUG_BLOCK_TIMING). Used for the B1-B4 microbenchmarks.
+TIMING_BLOCK_BIN := build/hidream_timing_block
+TIMING_BLOCK_OBJDIR := build/obj/timing_block
+TIMING_BLOCK_OBJS := $(patsubst %.c,$(TIMING_BLOCK_OBJDIR)/%.o,$(SRCS))
+$(TIMING_BLOCK_OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DO1_DEBUG_TIMING -DO1_DEBUG_BLOCK_TIMING $(CPPFLAGS) $(CUDA_CPPFLAGS) -c -o $@ $<
+$(TIMING_BLOCK_BIN): $(TIMING_BLOCK_OBJS) $(CUDA_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DO1_DEBUG_TIMING -DO1_DEBUG_BLOCK_TIMING -o $@ $(TIMING_BLOCK_OBJS) $(CUDA_OBJS) $(CUDA_LDFLAGS) $(CUBLAS_LDFLAGS) $(CUDNN_LDFLAGS) -lm -lstdc++ -l:libjpeg.so.8
+
+timing-block: $(TIMING_BLOCK_BIN)
+
 # OpenAI-compatible Images API server. It links the same runtime/CUDA objects
 # as the CLI: no inference logic is duplicated, only the HTTP layer is added.
 SERVER_SRCS := src/server/o1_server.c $(filter-out src/main.c,$(SRCS))
@@ -472,7 +497,7 @@ clean:
 	rm -rf build
 	find src tests -name '*.o' -delete
 
-.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity test-server test-engine server clean
+.PHONY: all test test-primitives test-block test-full-forward test-tokenizer test-m15 test-m17 test-m17-base test-rng test-png test-image test-layout test-seq test-seq-ref test-seq-diag test-seq-profiles test-decode test-refiner test-progress test-preview test-sanity test-server test-engine server clean timing timing-block bench-gemm
 # Base FlowUniPC CUDA kernel validation (M-post base default path).
 TEST_BUNIPC_BIN := build/test_base_unipc_cuda
 TEST_BUNIPC_SRCS := tests/unit/test_base_unipc_cuda.c src/model/scheduler.c $(CORE_SRCS)

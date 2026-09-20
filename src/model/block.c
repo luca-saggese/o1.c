@@ -45,6 +45,8 @@
 
 #include <cuda_runtime.h>
 
+#include "o1_timing.h"
+
 /* ------------------------------------------------------------------ */
 /* Bindings (resolved once at init; never looked up in the hot path)   */
 /* ------------------------------------------------------------------ */
@@ -242,31 +244,43 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
     /* ------------------------------------------------------------ */
     /* 1. input RMSNorm                                             */
     /* ------------------------------------------------------------ */
+    O1_BTIMING_BEGIN_GPU("B_input_norm");
     hd_rmsnorm(in_dev, w_in, ln, S, HD, eps);
+    O1_BTIMING_END_GPU("B_input_norm");
 
     /* 2. q/k/v projections (bias-free) -> [S, H*D] / [S, KV*D]       */
+    O1_BTIMING_BEGIN_GPU("B_qkv_proj");
     hd_linear(ln, w_q, NULL, qp, S, H * D, HD, 1);
     hd_linear(ln, w_k, NULL, kp, S, KV * D, HD, 1);
     hd_linear(ln, w_v, NULL, vp, S, KV * D, HD, 1);
+    O1_BTIMING_END_GPU("B_qkv_proj");
 
     /* 3. head split -> [H,S,D] / [KV,S,D]                            */
+    O1_BTIMING_BEGIN_GPU("B_head_split");
     hd_head_split(qp, q, S, H, D);
     hd_head_split(kp, k, S, KV, D);
     hd_head_split(vp, v, S, KV, D);
+    O1_BTIMING_END_GPU("B_head_split");
 
     /* 4. q/k RMSNorm over head dim (rows x cols = S*H x D)           */
+    O1_BTIMING_BEGIN_GPU("B_qk_norm");
     hd_rmsnorm(q, w_qn, qr, S * H, D, eps);
     hd_rmsnorm(k, w_kn, kr, S * KV, D, eps);
+    O1_BTIMING_END_GPU("B_qk_norm");
 
     /* 5. MRoPE cos/sin (fp32), section [24,20,20] interleaved. The section
      *    array is already device-resident (sec_dev, bound once at init);
      *    no HostToDevice transfer happens inside the forward.            */
+    O1_BTIMING_BEGIN_GPU("B_mrope");
     hd_mrope_cos_sin(pos_dev, 1, S, sec_dev, 3, D, theta, attn_scaling,
                      1, cosf, sinf);
+    O1_BTIMING_END_GPU("B_mrope");
 
     /* 6. apply rotary to q/k (head-major)                            */
+    O1_BTIMING_BEGIN_GPU("B_rope");
     hd_apply_rotary(qr, cosf, sinf, q, H, S, D);
     hd_apply_rotary(kr, cosf, sinf, k, KV, S, D);
+    O1_BTIMING_END_GPU("B_rope");
 
     /* 7. attention -> out [S,H,D] seq-major, already contiguous
      *    as [S, H*D] (torch .view(S,H,D) layout) ready for o_proj.
@@ -278,6 +292,7 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
      *        once by the caller (hd_generate) for the fixed shape.
      *      - eager reference (default): hd_attention_eager internally
      *        transposes head-major to seq-major, writing `as` directly.   */
+    O1_BTIMING_BEGIN_GPU("B_sdpa");
     if (sdpa) {
         int rc = hd_sdpa_execute(sdpa, q, k, v, mask_dev, sdpa_out, 0);
         if (rc != 0) {
@@ -293,32 +308,49 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
         hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
                            H, KV, S, D, scaling);
     }
+    O1_BTIMING_END_GPU("B_sdpa");
 
     /* 8. o_proj over [S, H*D] contiguous attention output. Note: the
      *    eager kernel's internal transpose (attn.cu) already produces the
      *    seq-major [S,H,D] == torch .view(S,H,D) layout, so this feeds
      *    hd_attention_eager's output directly into o_proj.             */
+    O1_BTIMING_BEGIN_GPU("B_o_proj");
     hd_linear(as, w_o, NULL, ah, S, HD, HD, 1);
+    O1_BTIMING_END_GPU("B_o_proj");
 
     /* 9.  residual: attn_r = x + attn_hidden                         */
+    O1_BTIMING_BEGIN_GPU("B_attn_resid");
     hd_residual_add(in_dev, ah, ar, (size_t)S_HID);
+    O1_BTIMING_END_GPU("B_attn_resid");
 
     /* 10. post-attention RMSNorm                                     */
+    O1_BTIMING_BEGIN_GPU("B_post_norm");
     hd_rmsnorm(ar, w_post, post, S, HD, eps);
+    O1_BTIMING_END_GPU("B_post_norm");
 
     /* 11. SwiGLU MLP                                                  */
+    O1_BTIMING_BEGIN_GPU("B_mlp_gate_up");
     hd_linear(post, w_g, NULL, gate, S, (int)ff_hidden, HD, 1);
     hd_linear(post, w_u, NULL, up, S, (int)ff_hidden, HD, 1);
+    O1_BTIMING_END_GPU("B_mlp_gate_up");
+    O1_BTIMING_BEGIN_GPU("B_swiglu");
     hd_swiglu(gate, up, swi, (size_t)S_I);
+    O1_BTIMING_END_GPU("B_swiglu");
+    O1_BTIMING_BEGIN_GPU("B_mlp_down");
     hd_linear(swi, w_d, NULL, mlp, S, HD, (int)ff_hidden, 1);
+    O1_BTIMING_END_GPU("B_mlp_down");
 
     /* 12. residual: mlpr = attn_r + mlp                              */
+    O1_BTIMING_BEGIN_GPU("B_mlp_resid");
     hd_residual_add(ar, mlp, mlpr, (size_t)S_HID);
+    O1_BTIMING_END_GPU("B_mlp_resid");
 
     /* copy result to caller output (device-to-device, async; the caller /
      * orchestrator owns synchronization — no sync inside the block)     */
+    O1_BTIMING_BEGIN_GPU("B_final_copy");
     cudaError_t e = cudaMemcpy(out_dev, mlpr, (size_t)S_HID * 2,
                                cudaMemcpyDeviceToDevice);
+    O1_BTIMING_END_GPU("B_final_copy");
     if (e != cudaSuccess) {
         hd_set_error("block: final copy %s", cudaGetErrorString(e));
         return HD_ERR_IO;

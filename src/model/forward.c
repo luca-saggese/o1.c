@@ -249,6 +249,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* Step 2: t_emb = t_embedder1(timestep), [H] bf16                    */
     /* ------------------------------------------------------------------ */
     O1_TIMING_BEGIN_GPU("EMBEDDING");
+    O1_BTIMING_BEGIN_GPU("E_timestep");
     hd_scale_f32(timestep, t_scaled, 1000.0f, 1);
     hd_timestep_embed(t_scaled, freq_f32, 1, 256);
     hd_f32_convert_bf16(freq_f32, freq_bf16, 256);
@@ -262,10 +263,12 @@ hd_status hd_forward(const hd_forward_binding *bw,
      * D2D-copy the result back into t_emb. */
     hd_linear(t_emb, bw->te2_w, bw->te2_b, te_hidden, 1, H, H, 1);
     cudaMemcpy(t_emb, te_hidden, (size_t)H * 2, cudaMemcpyDeviceToDevice);
+    O1_BTIMING_END_GPU("E_timestep");
 
     /* ------------------------------------------------------------------ */
     /* Step 1 + 3: embed -> where(tms, t_emb, embed) -> h_text [T,H]      */
     /* ------------------------------------------------------------------ */
+    O1_BTIMING_BEGIN_GPU("E_gather_tms");
     hd_gather_rows(bw->embed_tokens, input_ids, h_text, T, H,
                    (int64_t)151936);
     if (diag && diag->after_embedding)
@@ -286,6 +289,7 @@ hd_status hd_forward(const hd_forward_binding *bw,
         cudaMemcpy(hidden_a, h_text, (size_t)T * H * 2,
                    cudaMemcpyDeviceToDevice);
     }
+    O1_BTIMING_END_GPU("E_gather_tms");
     if (diag && diag->after_timestep_conditioning)
         cudaMemcpy(diag->after_timestep_conditioning, hidden_a,
                    (size_t)T * H * 2, cudaMemcpyDeviceToDevice);
@@ -294,9 +298,11 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* Step 4: vemb = x_embedder(vinputs), [I,H] bf16                     */
     /* ------------------------------------------------------------------ */
     /* proj1.weight [1024,3072] (out,in) -> transpose_w=1, no bias. */
+    O1_BTIMING_BEGIN_GPU("E_xembed");
     hd_linear(vinputs, bw->xe1_w, NULL, xe_stage, I, 1024, 3072, 1);
     /* proj2.weight [H,1024] (out,in) -> transpose_w=1, bias. */
     hd_linear(xe_stage, bw->xe2_w, bw->xe2_b, xe_out, I, H, 1024, 1);
+    O1_BTIMING_END_GPU("E_xembed");
     if (diag && diag->after_target_embedding)
         cudaMemcpy(diag->after_target_embedding, xe_out, (size_t)I * H * 2,
                    cudaMemcpyDeviceToDevice);
@@ -304,8 +310,10 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* ------------------------------------------------------------------ */
     /* Step 5: hidden_a = cat([h_text, vemb])  [S,H]                      */
     /* ------------------------------------------------------------------ */
+    O1_BTIMING_BEGIN_GPU("E_cat");
     cudaMemcpy((uint8_t *)hidden_a + (size_t)T * H * 2, xe_out,
                (size_t)I * H * 2, cudaMemcpyDeviceToDevice);
+    O1_BTIMING_END_GPU("E_cat");
     O1_TIMING_END_GPU("EMBEDDING");
     if (diag && diag->after_block_0_input)
         cudaMemcpy(diag->after_block_0_input, hidden_a, (size_t)S * H * 2,
