@@ -32,21 +32,9 @@
 
 #include "cuda_internal.h"
 
-/* Temporary stage-check macro for the vision tower bring-up. */
-#define CUDA_STAGE_CHECK(name) do { \
-    cudaError_t e1 = cudaGetLastError(); \
-    if (e1 != cudaSuccess) { \
-        fprintf(stderr, "%s launch: %s\n", name, cudaGetErrorString(e1)); \
-        abort(); \
-    } \
-    cudaError_t e2 = cudaDeviceSynchronize(); \
-    if (e2 != cudaSuccess) { \
-        fprintf(stderr, "%s sync: %s\n", name, cudaGetErrorString(e2)); \
-        abort(); \
-    } \
-} while (0)
 #include "gemm.h"
 #include "vision_kernels.h"
+#include "o1_timing.h"
 
 /* ------------------------------------------------------------------ */
 /* Binding resolution (stage B)                                        */
@@ -191,6 +179,20 @@ int64_t hd_vision_workspace_bytes(int64_t n) {
     return o.total_bytes;
 }
 
+/*
+ * Persistent table region: pos-interp idx [4n] int32 + wgt [4n] float,
+ * rotary coords [2n] int32, rotary inv_freq [18] float. Allocated once by
+ * the caller and reused for every forward of the same shape.
+ */
+int64_t hd_vision_tables_bytes(int64_t n) {
+    int64_t b = 0;
+    b += n * 4 * 4;   /* idx int32 */
+    b += n * 4 * 4;   /* wgt float */
+    b += n * 2 * 4;   /* rot coords int32 */
+    b += 18 * 4;      /* inv_freq float */
+    return b;
+}
+
 /* ------------------------------------------------------------------ */
 /* Vision kernels (stage D/E/F)                                        */
 /* ------------------------------------------------------------------ */
@@ -277,6 +279,65 @@ static void build_rot_coords(int grid_h, int grid_w, int merge_size,
     *coords_out = coords;
 }
 
+/*
+ * Builds the persistent device tables (pos-interp idx/wgt, rotary coords,
+ * rotary inv_freq) for (n, grid_h, grid_w) into the caller-provided table
+ * region and binds them into the workspace. Idempotent for a repeated
+ * shape. `ws->tables` must point at hd_vision_tables_bytes(n) bytes.
+ */
+hd_status hd_vision_prepare_tables(hd_vision_workspace *ws, int n,
+                                   int grid_h, int grid_w) {
+    if (!ws || n <= 0 || grid_h <= 0 || grid_w <= 0) {
+        hd_set_error("vision: bad prepare_tables args");
+        return HD_ERR_MISSING;
+    }
+    if (ws->tables_n == n && ws->tables_gh == grid_h && ws->tables_gw == grid_w)
+        return HD_OK;
+
+    uint8_t *t = (uint8_t *)ws->tables;
+    if (t == NULL) {
+        hd_set_error("vision: table region not bound");
+        return HD_ERR_MISSING;
+    }
+    int *pos_idx_d = (int *)t;          t += (size_t)n * 4 * 4;
+    float *pos_wgt_d = (float *)t;      t += (size_t)n * 4 * 4;
+    int *coords_d = (int *)t;           t += (size_t)n * 2 * 4;
+    float *inv_d = (float *)t;          t += 18 * 4;
+
+    int *idx = NULL; float *wgt = NULL;
+    build_pos_interp(grid_h, grid_w, 48, HD_VISION_MERGE_SIZE, &idx, &wgt);
+    int *coords = NULL;
+    build_rot_coords(grid_h, grid_w, HD_VISION_MERGE_SIZE, &coords);
+    if (!idx || !wgt || !coords) {
+        free(idx); free(wgt); free(coords);
+        hd_set_error("vision: table build oom");
+        return HD_ERR_OOM;
+    }
+    cudaMemcpy(pos_idx_d, idx, (size_t)4 * n * sizeof(int),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(pos_wgt_d, wgt, (size_t)4 * n * sizeof(float),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(coords_d, coords, (size_t)2 * n * sizeof(int),
+               cudaMemcpyHostToDevice);
+    free(idx); free(wgt); free(coords);
+
+    float inv_freq[18];
+    for (int k = 0; k < 18; k++) {
+        float e = (float)(2 * k) / 36.0f;
+        inv_freq[k] = 1.0f / powf(10000.0f, e);
+    }
+    cudaMemcpy(inv_d, inv_freq, 18 * sizeof(float), cudaMemcpyHostToDevice);
+
+    ws->pos_idx = pos_idx_d;
+    ws->pos_wgt = pos_wgt_d;
+    ws->rot_coords = coords_d;
+    ws->rot_inv = inv_d;
+    ws->tables_n = n;
+    ws->tables_gh = grid_h;
+    ws->tables_gw = grid_w;
+    return HD_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* Vision forward                                                      */
 /* ------------------------------------------------------------------ */
@@ -340,111 +401,128 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
     void *ds_fc1    = base + o.ds_fc1;
     void *ds_fc2    = base + o.ds_fc2;
 
-    /* ---- stage D: patch_embed ---- */
+    O1_TIMING_BEGIN_GPU("VISION_TOTAL");
+    /* ---- stage D: patch_embed ----
+     * Production path: the Conv3d-as-matmul patch embedding runs through the
+     * shared production GEMM backend (X[n,1536] x W[1152,1536]^T + bias,
+     * bf16 in/out, fp32 accumulate). HD_VISION_PATCH_REF=1 keeps the old
+     * scalar reference kernel for A/B validation. */
+    O1_TIMING_BEGIN_GPU("VISION_PATCH_EMBED");
     {
-        hd_vision_patch(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
-                     patch_out, n, HD_VISION_PATCH_DIM, H);
+        const char *ref = getenv("HD_VISION_PATCH_REF");
+        if (ref && strcmp(ref, "1") == 0)
+            hd_vision_patch(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
+                            patch_out, n, HD_VISION_PATCH_DIM, H);
+        else
+            hd_linear(pixel_values, bw->patch_proj_w, bw->patch_proj_b,
+                      patch_out, n, H, HD_VISION_PATCH_DIM, 1);
     }
-    CUDA_STAGE_CHECK("hd_vision_patch");
+    O1_TIMING_END_GPU("VISION_PATCH_EMBED");
 
     /* ---- pos_embed interpolate + add ---- */
+    O1_TIMING_BEGIN_GPU("VISION_PREPROCESS");
     {
-        int *idx = NULL; float *wgt = NULL;
-        build_pos_interp(grid_h, grid_w, 48, HD_VISION_MERGE_SIZE, &idx, &wgt);
-        int *idx_d = NULL; float *wgt_d = NULL;
-        cudaMalloc(&idx_d, (size_t)4 * n * sizeof(int));
-        cudaMalloc(&wgt_d, (size_t)4 * n * sizeof(float));
-        if (!idx_d || !wgt_d) {
-            free(idx); free(wgt);
-            hd_set_error("vision: pos interp alloc oom");
-            return HD_ERR_OOM;
+        /* Persistent device tables: built once by hd_vision_prepare_tables()
+         * for this (n, grid_h, grid_w) and reused for every forward. The
+         * hot path therefore performs no malloc / H2D / table rebuild. */
+        if (ws->pos_idx == NULL || ws->pos_wgt == NULL ||
+            ws->rot_coords == NULL || ws->rot_inv == NULL) {
+            hd_set_error("vision: persistent tables not prepared");
+            return HD_ERR_MISSING;
         }
-        cudaMemcpy(idx_d, idx, (size_t)4 * n * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(wgt_d, wgt, (size_t)4 * n * sizeof(float), cudaMemcpyHostToDevice);
-        free(idx); free(wgt);
-        hd_vision_pos_interp(bw->pos_embed, idx_d, wgt_d, pos_emb, n, H);
-        cudaFree(idx_d); cudaFree(wgt_d);
+        hd_vision_pos_interp(bw->pos_embed, ws->pos_idx, ws->pos_wgt,
+                             pos_emb, n, H);
         /* hidden = patch_out + pos_emb -> h_a */
         hd_residual_add(patch_out, pos_emb, h_a, (size_t)n * H);
     }
-    CUDA_STAGE_CHECK("hd_vision_pos_interp + residual_add");
 
     /* ---- rot_pos_emb -> cos/sin ---- */
     {
-        int *coords = NULL;
-        build_rot_coords(grid_h, grid_w, HD_VISION_MERGE_SIZE, &coords);
-        int *coords_d = NULL;
-        cudaMalloc(&coords_d, (size_t)2 * n * sizeof(int));
-        if (!coords_d) { free(coords); hd_set_error("vision: rot coords oom"); return HD_ERR_OOM; }
-        cudaMemcpy(coords_d, coords, (size_t)2 * n * sizeof(int), cudaMemcpyHostToDevice);
-        free(coords);
-        /* inv_freq: 1/(theta^(arange(0, dim, 2)/dim)), dim = head_dim/2 = 36 */
-        float inv_freq[18];
-        for (int k = 0; k < 18; k++) {
-            float e = (float)(2 * k) / 36.0f;
-            inv_freq[k] = 1.0f / powf(10000.0f, e);
-        }
-        float *inv_d = NULL;
-        cudaMalloc(&inv_d, 18 * sizeof(float));
-        if (!inv_d) { cudaFree(coords_d); hd_set_error("vision: inv_freq oom"); return HD_ERR_OOM; }
-        cudaMemcpy(inv_d, inv_freq, 18 * sizeof(float), cudaMemcpyHostToDevice);
-        hd_vision_rot(inv_d, coords_d, rot, n, 18);
-        cudaFree(inv_d); cudaFree(coords_d);
+        hd_vision_rot(ws->rot_inv, ws->rot_coords, rot, n, 18);
         /* cos/sin from rot [n, 36] -> [n, 72] fp32 */
         hd_vision_rot_cos_sin(rot, cosf, sinf, n, 18);
     }
+    O1_TIMING_END_GPU("VISION_PREPROCESS");
 
     /* ---- 27 blocks ---- */
+    O1_TIMING_BEGIN_GPU("VISION_27_BLOCKS");
     {
         const void *cur_in = h_a;
         void *cur_out = h_b;
         /* Zero additive attention mask [n,n] bf16 (vision attention is
-         * non-causal / full attention; the eager backend requires a mask
-         * pointer and adds it to the scores). */
+         * non-causal / full attention). Both backends consume it: the
+         * eager reference adds it to the scores, and the cuDNN graph has a
+         * bound zero bias tensor. Materialized once per forward, outside
+         * the block loop. */
         cudaMemset(mask, 0, (size_t)n * n * 2);
         for (int i = 0; i < HD_VISION_DEPTH; i++) {
             const hd_vision_block_binding *blk = &bw->blocks[i];
             /* norm1 */
+            O1_TIMING_BEGIN_GPU("V_b_layernorm");
             hd_vision_layernorm(cur_in, blk->norm1_w, blk->norm1_b, ln1, n, H, eps);
+            O1_TIMING_END_GPU("V_b_layernorm");
             /* qkv (cuBLAS) */
+            O1_TIMING_BEGIN_GPU("V_b_qkv_gemm");
             hd_linear(ln1, blk->qkv_w, blk->qkv_b, qkv, n, 3456, H, 1);
+            O1_TIMING_END_GPU("V_b_qkv_gemm");
             /* split q/k/v -> [Hd, n, D] */
+            O1_TIMING_BEGIN_GPU("V_b_rope_split_merge");
             hd_vision_qkv_split(qkv, q, k, v, n, Hd, D);
             /* rotary on q/k (cos/sin [n, 72]) */
             hd_apply_rotary_f32(q, cosf, sinf, qr, Hd, n, D);
             hd_apply_rotary_f32(k, cosf, sinf, kr, Hd, n, D);
+            O1_TIMING_END_GPU("V_b_rope_split_merge");
             /* attention: cuDNN SDPA (no mask) or eager reference.
              * cuDNN writes head-major [Hd, n, D]; eager writes seq-major
              * [n, Hd*D]. Normalize to seq-major in attn_out. */
+            O1_TIMING_BEGIN_GPU("V_b_sdpa");
             int sdpa_ok = 0;
             if (ws->sdpa) {
-                int rc = hd_sdpa_execute(ws->sdpa, qr, kr, v, NULL, qkv, 0);
+                int rc = hd_sdpa_execute(ws->sdpa, qr, kr, v, mask, qkv, 0);
                 if (rc == 0) {
                     /* qkv is free after qkv_split: use it as the head-major
                      * temp buffer, then transpose to seq-major attn_out. */
                     hd_vision_attn_merge(qkv, attn_out, Hd, n, D);
                     sdpa_ok = 1;
+                    O1_TIMING_COUNTER_ADD("VIS_SDPA_CUDNN", 1);
                 }
+#ifdef O1_DEBUG_TIMING
+                else if (i == 0)
+                    fprintf(stderr, "[edit-geom] vision sdpa execute FAILED "
+                                    "n=%d: %s\n", n, hd_last_error());
+#endif
             }
             if (!sdpa_ok) {
+                O1_TIMING_COUNTER_ADD("VIS_SDPA_EAGER", 1);
                 hd_attention_eager(qr, kr, v, mask, scores, probs,
                                    attn_out, Hd, Hd, n, D, scaling);
             }
+            O1_TIMING_END_GPU("V_b_sdpa");
             /* proj (cuBLAS) over [n, Hd*D] */
+            O1_TIMING_BEGIN_GPU("V_b_o_proj");
             hd_linear(attn_out, blk->proj_w, blk->proj_b, attn_resid, n, H, H, 1);
             /* residual: attn_resid = cur_in + attn_out */
             hd_residual_add(cur_in, attn_resid, attn_resid, (size_t)n * H);
+            O1_TIMING_END_GPU("V_b_o_proj");
             /* norm2 */
+            O1_TIMING_BEGIN_GPU("V_b_layernorm");
             hd_vision_layernorm(attn_resid, blk->norm2_w, blk->norm2_b, ln2, n, H, eps);
+            O1_TIMING_END_GPU("V_b_layernorm");
             /* mlp: fc1 -> gelu -> fc2 */
+            O1_TIMING_BEGIN_GPU("V_b_fc1");
             hd_linear(ln2, blk->fc1_w, blk->fc1_b, fc1, n, I, H, 1);
+            O1_TIMING_END_GPU("V_b_fc1");
             if (i == 0 && ws->block0_snaps && ws->block0_snaps[HD_B0_FC1])
                 cudaMemcpy(ws->block0_snaps[HD_B0_FC1], fc1, (size_t)n * I * 2,
                            cudaMemcpyDeviceToDevice);
+            O1_TIMING_BEGIN_GPU("V_b_gelu");
             hd_vision_gelu(fc1, fc1, (size_t)n * I);
+            O1_TIMING_END_GPU("V_b_gelu");
+            O1_TIMING_BEGIN_GPU("V_b_fc2");
             hd_linear(fc1, blk->fc2_w, blk->fc2_b, fc2, n, H, I, 1);
             /* residual: mlp_resid = attn_resid + fc2 */
             hd_residual_add(attn_resid, fc2, mlp_resid, (size_t)n * H);
+            O1_TIMING_END_GPU("V_b_fc2");
 
             /* Block-output debug snapshots (dedicated buffers, captured
              * DURING the forward before the ping-pong copy). */
@@ -485,6 +563,7 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
                 else if (i == 24) ds_idx = 2;
                 if (ds_idx >= 0) {
                     const hd_vision_merger_binding *ds = &bw->deepstack[ds_idx];
+                    O1_TIMING_BEGIN_GPU("VISION_DEEPSTACK_MERGERS");
                     /* NO spatial permutation: block output [n,1152] is
                      * already block-major; reinterpret as [m,4608] and
                      * norm over 4608 (use_postshuffle_norm=True). */
@@ -510,6 +589,7 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
                                    (size_t)m * O * 2, cudaMemcpyDeviceToDevice);
                     cudaMemcpy(deepstack_out[ds_idx], ds_fc2,
                                (size_t)m * O * 2, cudaMemcpyDeviceToDevice);
+                    O1_TIMING_END_GPU("VISION_DEEPSTACK_MERGERS");
                 }
             }
 
@@ -526,8 +606,10 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
             cur_in = tmp;
         }
     }
+    O1_TIMING_END_GPU("VISION_27_BLOCKS");
 
     /* ---- final merger ---- */
+    O1_TIMING_BEGIN_GPU("VISION_FINAL_MERGER");
     {
         const hd_vision_merger_binding *mg = &bw->merger;
         /* norm over 1152 (use_postshuffle_norm=False): norm applies to the
@@ -559,6 +641,8 @@ hd_status hd_vision_forward(const hd_vision_binding *bw,
         cudaMemcpy(image_embeds_out, merge_fc2, (size_t)m * O * 2,
                    cudaMemcpyDeviceToDevice);
     }
+    O1_TIMING_END_GPU("VISION_FINAL_MERGER");
+    O1_TIMING_END_GPU("VISION_TOTAL");
 
     return HD_OK;
 }

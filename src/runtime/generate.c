@@ -431,12 +431,13 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
     memset(&visual, 0, sizeof(visual));
     void *vimg_emb = NULL, *vds0 = NULL, *vds1 = NULL, *vds2 = NULL;
     uint8_t *vmask_h = NULL, *vmask_dev = NULL;
+    int V_total = 0;
     hd_vision_binding *vb = &e->vb;
     hd_vision_workspace vws;
     memset(&vws, 0, sizeof(vws));
+    int vws_sdpa_n = -1;
     {
         /* V = total merged vision tokens = sum(cond_h*cond_w) */
-        int V_total = 0;
         int max_N = 0;
         for (int r = 0; r < K; r++) {
             V_total += refs[r].cond_h * refs[r].cond_w;
@@ -454,7 +455,8 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
         /* Allocate the vision workspace (sized for max_N raw patches) and
          * the concatenated output buffers. */
         int64_t vws_bytes = hd_vision_workspace_bytes(max_N);
-        void *vwsbase = dev_alloc((size_t)vws_bytes);
+        int64_t vtab_bytes = hd_vision_tables_bytes(max_N);
+        void *vwsbase = dev_alloc((size_t)(vws_bytes + vtab_bytes));
         if (!vwsbase) {
             hd_set_error("generate: vision workspace alloc %lld bytes",
                          (long long)vws_bytes);
@@ -464,7 +466,9 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
             return HD_ERR_OOM;
         }
         vws.patch_out = vwsbase;
-        vws.bytes = vws_bytes;
+        vws.tables = (uint8_t *)vwsbase + vws_bytes;
+        vws.tables_n = -1;
+        vws.bytes = vws_bytes + vtab_bytes;
 
         vimg_emb = dev_alloc((size_t)V_total * HD_VISION_OUT_HIDDEN * 2);
         vds0 = dev_alloc((size_t)V_total * HD_VISION_OUT_HIDDEN * 2);
@@ -542,20 +546,33 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
                 dev_free(pv_dev);
                 goto vision_fail;
             }
-            /* cuDNN SDPA plan for this N (vision attention, head_dim 72) */
-            if (!vws.sdpa) {
+            /* cuDNN SDPA plan for this N (vision attention, head_dim 72).
+             * Cached by the actual N: references with different N rebuild
+             * the plan rather than silently reusing a mismatched one. */
+            if (vws.sdpa == NULL || vws_sdpa_n != N) {
+                if (vws.sdpa) { hd_sdpa_destroy(vws.sdpa); vws.sdpa = NULL; }
                 hd_sdpa_plan *vplan = NULL;
                 float vscale = (float)(1.0 / sqrt((double)HD_VISION_HEAD_DIM));
                 int vrc = hd_sdpa_create(&vplan, 1, HD_VISION_HEADS,
                                          HD_VISION_HEADS, N, N,
                                          HD_VISION_HEAD_DIM, vscale);
-                if (vrc == 0) vws.sdpa = vplan;
+                if (vrc == 0) { vws.sdpa = vplan; vws_sdpa_n = N; }
+#ifdef O1_DEBUG_TIMING
+                else fprintf(stderr, "[edit-geom] vision sdpa create FAILED "
+                                     "N=%d: %s\n", N, hd_last_error());
+#endif
             }
             void *vds_out[HD_VISION_NUM_DS] = {
                 (uint8_t *)vds0 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
                 (uint8_t *)vds1 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
                 (uint8_t *)vds2 + (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
             };
+            st = hd_vision_prepare_tables(&vws, N, gh, gw);
+            if (st != HD_OK) {
+                dev_free(pv_dev);
+                hd_set_error("generate: vision tables: %s", hd_last_error());
+                goto vision_fail;
+            }
             st = hd_vision_forward(vb, &vws, pv_dev, N, gh, gw,
                                    (uint8_t *)vimg_emb +
                                        (size_t)vis_off * HD_VISION_OUT_HIDDEN * 2,
@@ -572,6 +589,7 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
 
         /* Build the visual mask: mask[i] = 1 iff i < text_len and
          * input_ids[i] == 151655 (<image_pad>). Rows >= text_len are 0. */
+        O1_TIMING_BEGIN("SEQUENCE_MASK_BUILD");
         {
             int count = 0;
             for (int i = 0; i < S; i++) {
@@ -591,6 +609,7 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
             }
             cudaMemcpy(vmask_dev, vmask_h, (size_t)S, cudaMemcpyHostToDevice);
         }
+        O1_TIMING_END("SEQUENCE_MASK_BUILD");
 
         visual.image_embeds = vimg_emb;
         visual.deepstack[0] = vds0;
@@ -630,6 +649,20 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
     memset(&ws, 0, sizeof(ws));
     ws.hidden_a = wsbase;
     ws.block_scratch_bytes = scratch_bytes;
+
+#ifdef O1_DEBUG_TIMING
+    fprintf(stderr,
+            "[edit-geom] target_img_tokens=%d ref_pixel_tokens=%zu "
+            "total_img=%d text_len=%d SI=%d\n",
+            IMG, total_ref_tokens, total_img, text_len, S);
+    fprintf(stderr,
+            "[edit-geom] vlm_N=%d vlm_V=%d v_tokens=%d\n",
+            (K > 0) ? vlm_n[0] : 0,
+            (K > 0) ? V_total : 0, visual.v_tokens);    fprintf(stderr, "[edit-geom] forward_workspace_bytes=%lld "
+                    "decoder_scratch_bytes=%lld mask_bytes=%lld\n",
+            (long long)ws_bytes, (long long)scratch_bytes,
+            (long long)((size_t)S * S * 2));
+#endif
 
     /* cuDNN SDPA plan for the full sequence */
     {
@@ -704,6 +737,29 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
         free(ref_f32);
     }
 
+    /* Precompute the x_embedder output for the static reference rows.
+     * The edit loop re-appends the same reference pixel tokens on every
+     * denoise step, and the x_embedder GEMMs are row-independent, so the
+     * reference rows of xe_out are step-invariant. Computing them once and
+     * copying them in (see hd_forward step 4) yields bit-identical reference
+     * rows while skipping ~half the x_embedder work per step. */
+    void *xe_ref_dev = NULL;
+    if (total_ref_tokens > 0) {
+        size_t nref = total_ref_tokens;
+        void *stg = dev_alloc(nref * 1024 * 2);
+        xe_ref_dev = dev_alloc(nref * H * 2);
+        if (!stg || !xe_ref_dev) {
+            dev_free(stg); dev_free(xe_ref_dev); xe_ref_dev = NULL;
+            hd_set_error("generate: x_embedder ref cache alloc oom");
+            goto fail;
+        }
+        hd_linear(ref_dev, bw->xe1_w, NULL, stg, (int)nref, 1024, 3072, 1);
+        hd_linear(stg, bw->xe2_w, bw->xe2_b, xe_ref_dev, (int)nref, H, 1024, 1);
+        dev_free(stg);
+        ws.xe_ref = xe_ref_dev;
+        ws.n_ref = (int)nref;
+    }
+
     /* ---- initial noise (target latent) ---- */
     O1_TIMING_BEGIN("INITIAL_NOISE");
     float *noise_h = malloc((size_t)3 * Hh * W * sizeof(float));
@@ -760,6 +816,8 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
         cudaMemcpy(tsd, &t_pixeldit, 4, cudaMemcpyHostToDevice);
 
         /* vinputs = cat([z, ref_patches]) */
+        O1_TIMING_BEGIN("MEAN_STEP");
+        O1_TIMING_BEGIN_GPU("TRANSFORMER_PER_STEP");
         cudaMemcpy(vinput_dev, z_prev_dev, nimg * 2, cudaMemcpyDeviceToDevice);
         cudaMemcpy((char *)vinput_dev + nimg * 2, ref_dev,
                    total_ref_tokens * FF * 2, cudaMemcpyDeviceToDevice);
@@ -776,6 +834,7 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
         /* target rows: out_dev[text_len : text_len+IMG] */
         cudaMemcpy(xp_dev, (const char *)out_dev + (size_t)text_len * FF * 2,
                    nimg * 2, cudaMemcpyDeviceToDevice);
+        O1_TIMING_END_GPU("TRANSFORMER_PER_STEP");
 #ifdef O1_DEBUG_TIMING
         {
             uint16_t h[4];
@@ -831,6 +890,7 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
             goto fail;
         }
         cudaMemcpy(z_prev_dev, z_next_dev, nimg * 2, cudaMemcpyDeviceToDevice);
+        O1_TIMING_END("MEAN_STEP");
         if (req->progress_cb) req->progress_cb(i + 1, req->steps, req->progress_user);
     }
     O1_TIMING_END("DENOISE_TOTAL");
@@ -895,7 +955,7 @@ hd_status hd_engine_generate_ref(hd_generation_engine *e,
     dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
     dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
-    dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev);
+    dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev); dev_free(xe_ref_dev);
     if (vimg_emb) dev_free(vimg_emb);
     if (vds0) dev_free(vds0);
     if (vds1) dev_free(vds1);
@@ -912,7 +972,7 @@ fail:
     dev_free(wsbase); dev_free(posd); dev_free(maskd); dev_free(idsd);
     dev_free(secd); dev_free(z_prev_dev); dev_free(z_next_dev);
     dev_free(mo_dev); dev_free(noise_dev); dev_free(scratch); dev_free(tsd);
-    dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev);
+    dev_free(out_dev); dev_free(xp_dev); dev_free(ref_dev); dev_free(vinput_dev); dev_free(xe_ref_dev);
     if (vimg_emb) dev_free(vimg_emb);
     if (vds0) dev_free(vds0);
     if (vds1) dev_free(vds1);

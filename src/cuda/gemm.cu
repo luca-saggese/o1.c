@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <cuda_runtime.h>
+#include <time.h>
 #include <cublas_v2.h>
 #include <cublasLt.h>
 
@@ -100,6 +101,7 @@ void hd_linear_reference(const void *x_dev, const void *w_dev,
 typedef struct {
     int M, N, K;
     int valid;
+    float tune_ms;   /* one-time algorithm-selection cost */
     int tuned;
     cublasLtMatmulAlgo_t algo;
     size_t workspace_bytes;
@@ -325,6 +327,8 @@ static cublasStatus_t hd_gemmex_run(hd_gemm_runtime *rt,
  */
 static void hd_lt_tune(hd_gemm_runtime *rt, hd_lt_plan *p,
                        const void *x, const void *w, void *y) {
+    struct timespec _ts0, _ts1;
+    clock_gettime(CLOCK_MONOTONIC, &_ts0);
     cublasLtMatmulHeuristicResult_t results[16];
     int n = 0;
     cublasStatus_t st = cublasLtMatmulAlgoGetHeuristic(
@@ -394,6 +398,12 @@ static void hd_lt_tune(hd_gemm_runtime *rt, hd_lt_plan *p,
     p->algo = results[best].algo;
     p->workspace_bytes = results[best].workspaceSize;
     p->tuned = 1;
+    clock_gettime(CLOCK_MONOTONIC, &_ts1);
+    p->tune_ms = (_ts1.tv_sec - _ts0.tv_sec) * 1000.0f +
+                 (_ts1.tv_nsec - _ts0.tv_nsec) / 1e6f;
+    if (rt->debug)
+        fprintf(stderr, "[gemm] Lt tune %dx%dx%d: %.1f ms\n",
+                p->M, p->N, p->K, p->tune_ms);
     if (rt->debug) {
         fprintf(stderr, "[gemm] Lt %dx%dx%d: %d candidates, best=%d ws=%zu %.3f ms\n",
                 p->M, p->N, p->K, n, best, p->workspace_bytes, best_ms);

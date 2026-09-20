@@ -143,6 +143,16 @@ typedef struct {
     void *ds_merged;   /* [m, 4608] bf16 deepstack merged input */
     void *ds_fc1;      /* [m, 4608] bf16 deepstack fc1 out */
     void *ds_fc2;      /* [m, 4096] bf16 deepstack fc2 out */
+    /* Persistent device tables for the position-embedding interpolation and
+     * the rotary coordinates (built once for a given (n, grid_h, grid_w),
+     * not rebuilt per forward). Sized/owned by the workspace. */
+    void *pos_idx;     /* [4*n] int32 */
+    void *pos_wgt;     /* [4*n] float */
+    void *rot_coords;  /* [2*n] int32 */
+    void *rot_inv;     /* [18] float */
+    void *tables;      /* base of the table region (caller-owned) */
+    int tables_n;      /* n the tables were built for (-1 = none) */
+    int tables_gh, tables_gw; /* grid the tables were built for */
     int64_t bytes;
     /* cuDNN SDPA plan for the vision attention (created once by the caller
      * for the fixed n x n shape; NULL keeps the eager reference backend). */
@@ -189,6 +199,16 @@ hd_status hd_vision_resolve(const hd_weight_store *wstore,
 
 /* Size (bytes) of the persistent vision workspace for `n` tokens. */
 int64_t hd_vision_workspace_bytes(int64_t n);
+
+/*
+ * Bytes of the additional persistent table region (pos-interp idx/wgt,
+ * rotary coords, rotary inv_freq) for `n` tokens. Callers that own the
+ * workspace should allocate this in addition to hd_vision_workspace_bytes()
+ * and store the base pointer in hd_vision_workspace::tables.
+ */
+int64_t hd_vision_tables_bytes(int64_t n);
+
+/*
 
 /*
  * Run the vision tower forward, batch 1, single image (grid_t=1).

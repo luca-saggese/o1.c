@@ -155,13 +155,17 @@ int main(void) {
 
     /* ---- workspace ---- */
     int64_t ws_bytes = hd_vision_workspace_bytes(n);
-    printf("ws_bytes=%lld\n", (long long)ws_bytes);
+    int64_t tab_bytes = hd_vision_tables_bytes(n);
+    printf("ws_bytes=%lld tab_bytes=%lld\n", (long long)ws_bytes,
+           (long long)tab_bytes);
     void *wsbase = NULL;
-    cudaMalloc(&wsbase, (size_t)ws_bytes);
+    cudaMalloc(&wsbase, (size_t)(ws_bytes + tab_bytes));
     hd_vision_workspace ws;
     memset(&ws, 0, sizeof(ws));
     ws.patch_out = wsbase;
-    ws.bytes = ws_bytes;
+    ws.tables = (uint8_t *)wsbase + ws_bytes;
+    ws.tables_n = -1;
+    ws.bytes = ws_bytes + tab_bytes;
 
     /* cuDNN SDPA plan for the vision attention (HD_VISION_EAGER=1 forces the
              * eager reference backend for A/B comparison). */
@@ -251,7 +255,10 @@ int main(void) {
     cudaError_t pre_err = cudaGetLastError();
     if (pre_err != cudaSuccess)
         printf("pre-forward CUDA error: %s\n", cudaGetErrorString(pre_err));
-    hd_status st = hd_vision_forward(&vb, &ws, pv_d, n, grid_h, grid_w,
+    hd_status st = hd_vision_prepare_tables(&ws, n, grid_h, grid_w);
+    if (st != HD_OK) printf("prepare tables error: %s\n", hd_last_error());
+    CHECK(st == HD_OK, "vision tables prepare");
+    st = hd_vision_forward(&vb, &ws, pv_d, n, grid_h, grid_w,
                                      emb_d, ds_out);
     cudaDeviceSynchronize();
     if (st != HD_OK) printf("vision forward error: %s\n", hd_last_error());

@@ -76,6 +76,14 @@ typedef struct {
     void *t_scaled;      /* [1] fp32 scaled timestep (t*1000)  */
     void *xe_stage;      /* [img, 1024] bf16 x_embedder proj1  */
     void *xe_out;        /* [img, H] bf16 x_embedder proj2 out */
+    /* Optional: precomputed embedding of the trailing `n_ref` vinputs rows.
+     * The edit path re-appends the same reference pixel tokens on every
+     * denoise step, so their x_embedder output is step-invariant and can be
+     * computed once. When set, step 4 only embeds the leading I-n_ref rows
+     * and copies this buffer into the tail (numerically identical for the
+     * reference rows). NULL keeps the full recompute. */
+    void *xe_ref;        /* [n_ref, H] bf16 */
+    int n_ref;
     void *block_scratch; /* decoder block scratch (persistent) */
     int64_t block_scratch_bytes;
     /* cuDNN SDPA attention plan (M2 pre-baseline). Created once by the

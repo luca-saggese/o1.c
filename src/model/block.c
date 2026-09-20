@@ -299,12 +299,15 @@ hd_status hd_decoder_block(const void *in_dev, const float *pos_dev,
             /* cuDNN SDPA may reject non-standard shapes (e.g. large
              * keep-original-aspect sequences); fall back to the eager
              * reference backend rather than aborting generation. */
+            O1_TIMING_COUNTER_ADD("DEC_SDPA_EAGER", 1);
             hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
                                H, KV, S, D, scaling);
         } else {
+            O1_TIMING_COUNTER_ADD("DEC_SDPA_CUDNN", 1);
             hd_head_merge(sdpa_out, as, S, H, D);
         }
     } else {
+        O1_TIMING_COUNTER_ADD("DEC_SDPA_EAGER_NOPLAN", 1);
         hd_attention_eager(q, k, v, mask_dev, scores, probs, as,
                            H, KV, S, D, scaling);
     }

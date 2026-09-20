@@ -299,9 +299,18 @@ hd_status hd_forward(const hd_forward_binding *bw,
     /* ------------------------------------------------------------------ */
     /* proj1.weight [1024,3072] (out,in) -> transpose_w=1, no bias. */
     O1_BTIMING_BEGIN_GPU("E_xembed");
-    hd_linear(vinputs, bw->xe1_w, NULL, xe_stage, I, 1024, 3072, 1);
-    /* proj2.weight [H,1024] (out,in) -> transpose_w=1, bias. */
-    hd_linear(xe_stage, bw->xe2_w, bw->xe2_b, xe_out, I, H, 1024, 1);
+    if (ws->xe_ref && ws->n_ref > 0 && ws->n_ref < I) {
+        int I_t = I - ws->n_ref;
+        hd_linear(vinputs, bw->xe1_w, NULL, xe_stage, I_t, 1024, 3072, 1);
+        hd_linear(xe_stage, bw->xe2_w, bw->xe2_b, xe_out, I_t, H, 1024, 1);
+        cudaMemcpy((uint8_t *)xe_out + (size_t)I_t * H * 2, ws->xe_ref,
+                   (size_t)ws->n_ref * H * 2, cudaMemcpyDeviceToDevice);
+    } else {
+        /* proj1.weight [1024,3072] (out,in) -> transpose_w=1, no bias. */
+        hd_linear(vinputs, bw->xe1_w, NULL, xe_stage, I, 1024, 3072, 1);
+        /* proj2.weight [H,1024] (out,in) -> transpose_w=1, bias. */
+        hd_linear(xe_stage, bw->xe2_w, bw->xe2_b, xe_out, I, H, 1024, 1);
+    }
     O1_BTIMING_END_GPU("E_xembed");
     if (diag && diag->after_target_embedding)
         cudaMemcpy(diag->after_target_embedding, xe_out, (size_t)I * H * 2,
