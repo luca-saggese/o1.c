@@ -435,3 +435,277 @@ artifacts/m2/perf/
   nsys_1step.nsys-rep, nsys_1step.sqlite
   instrumentation.diff
 ```
+
+---
+
+# Part 2 — cuBLASLt production GEMM path
+
+Commits:
+
+| Purpose | Hash | Contents |
+|---|---|---|
+| instrumentation baseline | `6956cf0` | `o1_timing.{c,h}`, `block.c`, `forward.c`, `main.c`, `Makefile`, `bench_gemm.c`, this ledger |
+| cuBLASLt optimization | `4f09036` | `src/cuda/gemm.cu`, `src/cuda/gemm.h`, `src/model/weights.c`, `tests/unit/bench_gemm.c` |
+
+## 18. Audit of pre-existing cuBLASLt work
+
+`git log -S'cublasLt' --all --oneline` returns no commit: there was **no
+committed cuBLASLt implementation** in history. What existed was an
+*uncommitted working-tree* implementation in `src/cuda/gemm.cu` (a
+`hd_lt_plan` struct, `hd_lt_run`, `hd_lt_tune`, `hd_gemm_cublaslt`) that had
+never been wired into the production dispatch. `git grep -n cublasLt` before
+this task matched only that uncommitted diff; `HD_GEMM_CUBLASLT` does not
+exist anywhere in the tree.
+
+**Root cause of the plain-`cublasGemmEx` profile.** Three independent
+reasons, all verified in code:
+
+1. `hd_linear()` dispatched on `g_prod_backend`, whose default is `0`, but
+   the `hd_gemm_cublaslt` branch was only reachable when `g_rt->lt` was
+   non-NULL *and* a plan could be built. The plan cache did not exist, so
+   every call fell through to `hd_gemmex_run`.
+2. `hd_gemm_runtime_init()` was called from `src/model/weights.c` as
+   `hd_gemm_runtime_init(device_id, 0)` — a **zero-byte workspace**, so any
+   candidate algorithm requiring workspace was rejected and the Lt path had
+   no persistent buffer to run in.
+3. Nothing selected a *tuned* algorithm: there was no cached algorithm, so
+   even a successful Lt call would have used an unselected default.
+
+So the answer to "why were we profiling plain cuBLAS" is **not** a
+regression or a revert: the intended Lt path had simply never been completed
+and committed. `cublasGemmEx` was doing exactly what the code said.
+
+## 19. Exact unique 2048 GEMM shapes
+
+All shapes are identical across all 36 blocks and all 28 denoise steps.
+Measured `S = 4122` for the 3-step probe (the frozen 28-step run reports
+`S = 4115`; the difference is the CFG text/generation split and does not
+change the shape set).
+
+| GEMM | M | N | K | dtype | compute | calls/block | calls/transformer |
+|---|---|---|---|---|---|---|---|
+| q_proj | 4122 | 4096 | 4096 | bf16→bf16 | fp32 | 1 | 36 |
+| k_proj | 4122 | 1024 | 4096 | bf16→bf16 | fp32 | 1 | 36 |
+| v_proj | 4122 | 1024 | 4096 | bf16→bf16 | fp32 | 1 | 36 |
+| o_proj | 4122 | 4096 | 4096 | bf16→bf16 | fp32 | 1 | 36 |
+| gate_proj | 4122 | 12288 | 4096 | bf16→bf16 | fp32 | 1 | 36 |
+| up_proj | 4122 | 12288 | 4096 | bf16→bf16 | fp32 | 1 | 36 |
+| down_proj | 4122 | 4096 | 12288 | bf16→bf16 | fp32 | 1 | 36 |
+| final head | 4122 | 3072 | 4096 | bf16→bf16 | fp32 | — | 1 |
+| tms embed | 1 | 4096 | 256 | bf16→bf16 | fp32 | — | 1 |
+| tms proj | 1 | 4096 | 4096 | bf16→bf16 | fp32 | — | 1 |
+
+Layout contract: `Y[M,N] = X[M,K] · W[N,K]^T`, row-major X/W/Y.
+cuBLASLt descriptors: `Adesc` = X `[M,K]` ld=K `ORDER_ROW`; `Bdesc` = W
+`[N,K]` ld=K `ORDER_ROW` with `TRANSA=N`, `TRANSB=T`; `Cdesc` = Y `[M,N]`
+ld=N `ORDER_ROW`. Bias is still applied by the separate
+`hd_gemm_bias_add_kernel`.
+
+## 20. Implementation changes
+
+- `hd_lt_plan` cache (32 slots) keyed on `(M,N,K)`; descriptors built once
+  per shape, reused for all blocks and steps.
+- `hd_lt_tune()` — enumerates the heuristic candidates, rejects any that
+  does not reproduce the `cublasGemmEx` oracle bit-for-bit, benchmarks the
+  survivors with CUDA events (3 iterations, best-of) and caches the fastest.
+  Runs once per unique shape, never in steady state.
+- `hd_gemm_cublaslt()` — `O1_GEMM_TUNE=0` uses `heuristic[0]`; `tune=1`
+  (default) uses the tuner. Added an explicit `cublasGemmEx` fallback when no
+  algorithm was selected, instead of launching an unselected algorithm.
+- `hd_gemm_set_prod_backend()` added to `gemm.h`; `O1_GEMM_BACKEND=ex`
+  forces the GemmEx sub-backend for A/B.
+- `weights.c`: `hd_gemm_runtime_init(device_id, 0)` → `(device_id, 64u<<20)`
+  in both `hd_weights_to_device` and `hd_weights_to_device_gguf`.
+- Env knobs: `O1_GEMM_TUNE`, `O1_GEMM_DEBUG`, `O1_GEMM_BACKEND`.
+
+## 21. Selected algorithm and workspace per shape
+
+`O1_GEMM_DEBUG=1`, 3-step probe:
+
+| Shape (M×N×K) | candidates | selected | workspace | tuned ms |
+|---|---|---|---|---|
+| 1×4096×256 | 9 | best=4 | 0 | 0.015 |
+| 1×4096×4096 | 8 | best=0 | 0 | 0.222 |
+| 4122×4096×4096 (q,o) | 3 | best=0 | 0 | 4.662 |
+| 4122×1024×4096 (k,v) | 6 | best=0 | 0 | 1.195 |
+| 4122×12288×4096 (gate,up) | 3 | best=0 | 0 | 13.576 |
+| 4122×4096×12288 (down) | 3 | best=0 | 0 | 14.152 |
+| 4122×3072×4096 (head) | 3 | best=1 | 0 | 3.449 |
+
+**Every selected algorithm requires 0 bytes of workspace** — the 64 MiB
+persistent buffer is allocated but unused by these selections. It is kept as
+headroom so that a future shape or cuBLAS version can select a
+workspace-backed algorithm without a hot-path allocation.
+
+The algorithm space on this platform is very small: the heuristic returns
+3 candidates for the large shapes, and `cublasLtMatmulAlgoGetIds` returns 20
+IDs of which only 1 passes `AlgoCheck`. `CUBLAS_COMPUTE_16F` with BF16
+inputs is `NOT_SUPPORTED` (status 15), so FP32 accumulate is mandatory.
+
+## 22. Device ceiling
+
+| GEMM | ms | TFLOP/s |
+|---|---|---|
+| 2048³ | 0.644 | 26.67 |
+| 4096³ | 4.636 | 29.65 |
+| 8192³ | 35.523 | 30.95 |
+| 12288³ | 117.197 | 31.66 |
+
+Measured device ceiling ≈ **31.7 TFLOP/s** (bf16 in / fp32 acc, GB10, 48 SM).
+The production shapes run at 29–31 TFLOP/s, i.e. **~94 % of the achievable
+ceiling**. fp16 gives no headroom (32.00 TFLOP/s fp16/fp32acc, 31.51
+fp16/fp16acc — measured, same ceiling).
+
+## 23. GEMM before/after — B0 microbench (real 2048 shapes)
+
+`./build/bench_gemm 4115 50`:
+
+| GEMM | M | N | K | Lt ms | Lt TF | GemmEx ms | GemmEx TF | ratio |
+|---|---|---|---|---|---|---|---|---|
+| q_proj | 4115 | 4096 | 4096 | 4.614 | 29.93 | 4.643 | 29.74 | 1.01× |
+| k_proj | 4115 | 1024 | 4096 | 1.153 | 29.94 | 1.176 | 29.35 | 1.02× |
+| v_proj | 4115 | 1024 | 4096 | 1.158 | 29.80 | 1.177 | 29.34 | 1.02× |
+| o_proj | 4115 | 4096 | 4096 | 4.618 | 29.90 | 4.612 | 29.94 | 1.00× |
+| gate_proj | 4115 | 12288 | 4096 | 13.538 | 30.60 | 13.571 | 30.52 | 1.00× |
+| up_proj | 4115 | 12288 | 4096 | 13.560 | 30.55 | 13.567 | 30.53 | 1.00× |
+| down_proj | 4115 | 4096 | 12288 | 13.555 | 30.56 | 13.595 | 30.47 | 1.00× |
+| final_head | 4115 | 3072 | 4096 | 3.483 | 29.73 | 3.516 | 29.45 | 1.01× |
+| te0 (M=1) | 1 | 4096 | 256 | 0.014 | 0.15 | 0.033 | 0.06 | 2.29× |
+| te2 (M=1) | 1 | 4096 | 4096 | 0.209 | 0.16 | 0.217 | 0.15 | 1.04× |
+
+**cuBLASLt and cublasGemmEx are within 1 % on every dominant production
+shape.** The only material win is the tiny `M=1` timestep GEMM (2.29×), worth
+~0.02 ms/step. There is no GEMM headroom left to recover.
+
+## 24. Block / transformer / step before/after
+
+3 denoise steps = 108 blocks. GPU seconds from the block timing build.
+
+| region | GemmEx (before) | Lt tuned (after) | Δ |
+|---|---|---|---|
+| B_mlp_gate_up | 3.0395 | 3.5636 | one-time tuning |
+| B_mlp_down | 1.5041 | 1.8461 | one-time tuning |
+| B_qkv_proj | 0.7881 | 1.0966 | one-time tuning |
+| B_o_proj | 0.5230 | 0.5197 | — |
+| B_sdpa | 1.4994 | 1.5047 | — |
+| BLOCK_SINGLE | 8.0974 | 9.2750 | — |
+| TRANSFORMER_TOTAL | 8.6760 | 10.1308 | — |
+| per block (ms) | 74.98 | 85.88 | — |
+
+The delta is **entirely the one-time first-touch tuning cost**, which is
+charged to whichever block first executes each unique shape. Steady state is
+identical: with the tuner warm, `tune=0` (heuristic[0]) measures 74.10 ms/block
+and `tune=1` 74.10 ms/block — both within noise of the GemmEx 74.98 ms/block
+baseline.
+
+Steady-state per-block profile with the cuBLASLt backend (tuned), 3 steps:
+
+| region | GPU s | count | ms/block |
+|---|---|---|---|
+| B_input_norm | 0.0348 | 108 | 0.322 |
+| B_qkv_proj | 0.7906 | 108 | 7.320 |
+| B_head_split | 0.1052 | 108 | 0.974 |
+| B_qk_norm | 0.1627 | 108 | 1.506 |
+| B_mrope | 0.0052 | 108 | 0.048 |
+| B_rope | 0.1032 | 108 | 0.956 |
+| B_sdpa | 1.4995 | 108 | 13.884 |
+| B_o_proj | 0.5228 | 108 | 4.840 |
+| B_attn_resid | 0.0526 | 108 | 0.487 |
+| B_post_norm | 0.0330 | 108 | 0.305 |
+| B_mlp_gate_up | 3.0405 | 108 | 28.152 |
+| B_swiglu | 0.1654 | 108 | 1.532 |
+| B_mlp_down | 1.5087 | 108 | 13.969 |
+| B_mlp_resid | 0.0516 | 108 | 0.478 |
+| B_final_copy | 0.0306 | 108 | 0.283 |
+| **BLOCK_SINGLE** | **8.1092** | 108 | **75.085** |
+| EMBEDDING | 0.5090 | 3 | 4.713 |
+| TRANSFORMER_TOTAL | 8.6327 | 3 | 79.933 |
+| FINAL_NORM_HEAD | 0.0144 | 3 | 0.133 |
+| SCHEDULER | 0.0070 | 3 | 0.065 |
+
+## 25. Full CLI 28-step before/after
+
+| run | GemmEx baseline (s) | Lt tuned (s) |
+|---|---|---|
+| warmup | 85.55 | 84.55 |
+| run1 | 86.00 | 85.74 |
+| run2 | 84.11 | 86.18 |
+| run3 | 84.08 | 85.22 |
+| max RSS | 823 MB | 887 MB |
+
+Identical within run-to-run noise (±1.5 s). The cuBLASLt path is a
+**correctness/lifecycle completion, not a speedup** — as the ~94 %-of-ceiling
+measurement predicts.
+
+## 26. Numerical results
+
+| comparison | max_abs | mean_abs | NRMSE | cosine | pixels differing |
+|---|---|---|---|---|---|
+| Lt tuned vs GemmEx, 3-step | 0 | 0 | 0 | 1.000000 | 0 % |
+| Lt tuned vs GemmEx, 28-step | 0 | 0 | 0 | 1.000000 | 0 % |
+| Lt heuristic[0] vs GemmEx, 3-step | 229 | 51.0 | 0.2455 | 0.877944 | 99.4 % |
+| reference GEMM vs GemmEx | — | — | 0.1189 | 0.9929 | 87.9 % |
+
+Key result: the **tuned** cuBLASLt selection reproduces `cublasGemmEx`
+**bit-for-bit** (identical PNG md5 `60614703addca835ac80c3d6858ecd88` at
+3 steps and `f0932876085fc9255117fae49e43d2a8` at 28 steps). The raw
+`heuristic[0]` candidate does **not** (cos 0.878) — which is exactly what the
+tuner's bit-exact filter exists to prevent. Tuning therefore stays the
+default: it costs a one-time ~1.1 s but buys bit-exactness at identical
+steady-state throughput.
+
+The residual ~0.99 divergence between the reference kernel and the cuBLAS
+family is the previously-accepted pre-existing difference and is unchanged by
+this work.
+
+## 27. Correctness ladder
+
+| test | result |
+|---|---|
+| `test_gemm_smoke` | PASS (2×2, 4×3×5) |
+| `test_primitives` | 33 assertions, 0 failed |
+| `test_block` | 7 assertions, 0 failed |
+| `test_sdpa_block` | 4 assertions, 0 failed |
+| `test_sdpa_forward` | 4 assertions, 0 failed |
+| `test_layer_replay` | REPLAY PASS |
+| `test_full_forward` | 13 passed, 1 failed |
+
+`test_full_forward`'s `complete_output` reports
+`nrmse=0.15267 cos=0.98882141` — the **known pre-existing** failure, unchanged
+and with its threshold untouched. No new regression.
+
+## 28. Hot-path lifecycle (cuBLASLt path)
+
+No `cublasLtCreate`, no descriptor creation, no heuristic search, no
+`cudaMalloc`/`cudaFree`, no workspace allocation and no device synchronization
+occur in steady state. All of the above happen once per unique shape during
+the first block that touches it. `hd_lt_run` re-runs the selected algorithm
+after tuning, so the first call's output is guaranteed to come from the
+cached algorithm.
+
+## 29. Conclusion and next target
+
+The GEMM workload runs at ~94 % of the measured device ceiling. Completing
+and tuning the cuBLASLt path made the backend correct, deterministic and
+bit-exact against `cublasGemmEx`, with a clean persistent lifecycle, but it
+does **not** and cannot yield a meaningful speedup on this hardware.
+
+**C1 (cuBLASLt with cached algorithms) is therefore closed as complete and
+non-beneficial.** The remaining measured headroom is elsewhere: SDPA 17.2 %,
+MLP pointwise (SwiGLU 1.5 ms/block, norms 2.1 ms/block), and the ~3 %
+non-GPU denoise overhead. The next optimization target should be selected
+from C3/C4/C6, not from GEMM.
+
+## 30. Artifacts (Part 2)
+
+```
+artifacts/m2/perf/
+  b0_gemm_lt.txt
+  lt_layout_probe.txt, lt_peak_probe.txt, lt_compute_type_probe.txt,
+  lt_algo_ids_probe.txt, lt_fp16_ceiling_probe.txt
+  after/{warmup,run1,run2,run3}.{png,json,log,time}      (Lt tuned)
+  final/{b4_3step.*, cmp_default.*, cmp_tune1.*, cmp_ex.*}
+  final2/{t1.*, ex.*}                                    (28-step A/B)
+  run_after.sh
+```
+```
