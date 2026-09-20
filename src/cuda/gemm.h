@@ -4,12 +4,13 @@
 /*
  * M2 production GEMM backend.
  *
- * hd_linear() dispatches to a persistent cuBLAS/cuBLASLt runtime when one is
+ * hd_linear() dispatches to a persistent cuBLASLt runtime when one is
  * active (hd_gemm_runtime_init), otherwise falls back to the hand-written
  * reference kernel (hd_linear_reference). The runtime owns:
  *   - one cublasHandle_t / cublasLtHandle_t (created once, destroyed once)
  *   - a persistent workspace (no cudaMalloc/free in the forward)
- *   - a cached cuBLASLt matmul plan per (M,N,K,layout) shape
+ *   - a cached cuBLASLt matmul plan per (M,N,K) shape, with a tuned and
+ *     cached algorithm selected once per shape
  *
  * The reference kernel is kept as the correctness/debug backend.
  */
@@ -58,6 +59,13 @@ void hd_linear(const void *x_dev, const void *w_dev, const void *bias_dev,
 
 /* Selects the backend used by hd_linear (default: production). */
 void hd_gemm_set_backend(int use_production);
+
+/*
+ * Selects the production sub-backend: 0 = cuBLASLt (default, tuned+cached
+ * per shape), 1 = cublasGemmEx (fallback/debug). Only meaningful when the
+ * production backend is active.
+ */
+void hd_gemm_set_prod_backend(int backend);
 
 #ifdef __cplusplus
 }

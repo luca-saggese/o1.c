@@ -490,9 +490,10 @@ hd_status hd_weights_to_device(const char *model_dir, const hd_st_index *idx,
                           (o1_timing_region_seconds("FILE_READ") > 0
                                ? o1_timing_region_seconds("FILE_READ") : 1e-9));
 
-    /* M2: persistent cuBLAS/cuBLASLt GEMM runtime (created once, destroyed
-     * in hd_weight_store_free). 64 MiB workspace for cuBLASLt plans. */
-    info.gemm = hd_gemm_runtime_init(device_id, 0);
+    /* M2: persistent cuBLASLt GEMM runtime (created once, destroyed in
+     * hd_weight_store_free). 64 MiB persistent workspace for cuBLASLt
+     * algorithms; no allocation happens in the forward hot path. */
+    info.gemm = hd_gemm_runtime_init(device_id, 64u << 20);
     if (!info.gemm) {
         w_err("gemm runtime init failed: %s", hd_cuda_errbuf());
         st = HD_ERR_IO;
@@ -641,7 +642,7 @@ hd_status hd_weights_to_device_gguf(const char *gguf_path, int device_id,
                           (o1_timing_region_seconds("FILE_READ") > 0
                                ? o1_timing_region_seconds("FILE_READ") : 1e-9));
 
-    info.gemm = hd_gemm_runtime_init(device_id, 0);
+    info.gemm = hd_gemm_runtime_init(device_id, 64u << 20);
     if (!info.gemm) {
         w_err("gemm runtime init failed: %s", hd_cuda_errbuf());
         hd_gguf_close(&gf);

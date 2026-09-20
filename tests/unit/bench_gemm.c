@@ -52,8 +52,10 @@ typedef struct {
     const void *w;
 } gemm_case;
 
-static void bench_one(const gemm_case *g, const void *x, void *y, int iters) {
-    /* warmup */
+static double bench_backend(const gemm_case *g, const void *x, void *y,
+                            int iters, int prod_backend) {
+    hd_gemm_set_prod_backend(prod_backend);
+    /* warmup (also triggers Lt plan creation + tuning on first call) */
     for (int i = 0; i < 3; i++)
         hd_linear(x, g->w, NULL, y, g->M, g->N, g->K, 1);
     cudaDeviceSynchronize();
@@ -70,12 +72,21 @@ static void bench_one(const gemm_case *g, const void *x, void *y, int iters) {
     cudaEventElapsedTime(&ms, t0, t1);
     cudaEventDestroy(t0);
     cudaEventDestroy(t1);
+    return ms / (double)iters;
+}
 
-    double per_call = ms / (double)iters;
+static void bench_one(const gemm_case *g, const void *x, void *y, int iters) {
+    double lt_ms = bench_backend(g, x, y, iters, 0);
+    double ex_ms = bench_backend(g, x, y, iters, 1);
+    hd_gemm_set_prod_backend(0);
+
     double flops = 2.0 * (double)g->M * g->N * g->K;
-    double tflops = flops / (per_call * 1e-3) / 1e12;
-    printf("%-12s M=%-6d N=%-6d K=%-6d  %8.3f ms/call  %8.2f TFLOP/s  bf16->bf16 cuBLAS\n",
-           g->name, g->M, g->N, g->K, per_call, tflops);
+    double lt_tf = flops / (lt_ms * 1e-3) / 1e12;
+    double ex_tf = flops / (ex_ms * 1e-3) / 1e12;
+    printf("%-12s M=%-6d N=%-6d K=%-6d  Lt %8.3f ms %7.2f TF  |  "
+           "GemmEx %8.3f ms %7.2f TF  |  %5.2fx\n",
+           g->name, g->M, g->N, g->K, lt_ms, lt_tf, ex_ms, ex_tf,
+           ex_ms / lt_ms);
 }
 
 int main(int argc, char **argv) {
