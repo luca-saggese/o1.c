@@ -47,47 +47,81 @@ command -v sha256sum >/dev/null || die "sha256sum is required but not installed"
 MODEL_ID="${POS[0]:-}"
 QUANT="${POS[1]:-bf16}"
 
+# ---- manifest parsing (no Python required) ----------------------------------
+# models/manifest.json is pretty-printed with 4-space object indentation, so a
+# small awk reader is enough. Keeping this dependency-free is deliberate: the
+# download path must work on a machine without Python or PyTorch.
+# Only the top-level "models" array is considered; the "unavailable" list is
+# reported separately.
+mf_obj() { # $1 = model id -> prints the manifest object for that id
+    awk -v mid="$1" '
+        /^  "models": \[/ { insec = 1; next }
+        insec && /^  \]/  { insec = 0 }
+        !insec            { next }
+        /^    \{/ { inobj = 1; buf = "" }
+        inobj     { buf = buf $0 "\n" }
+        /^    \}/ {
+            if (inobj && buf ~ ("\"id\": \"" mid "\"")) { printf "%s", buf; exit }
+            inobj = 0
+        }
+    ' "$MANIFEST"
+}
+
+mf_str() { mf_obj "$1" | sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
+mf_num() { mf_obj "$1" | sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1; }
+mf_bool() { mf_obj "$1" | sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\(true\|false\).*/\1/p" | head -1; }
+
+mf_all_ids() { # ids in manifest order, models array only
+    awk '/^  "models": \[/ { insec = 1; next }
+         insec && /^  \]/  { insec = 0 }
+         insec && match($0, /"id": "[^"]*"/) { print substr($0, RSTART + 7, RLENGTH - 8) }' "$MANIFEST"
+}
+
 # ---- list -------------------------------------------------------------------
 if [ -z "$MODEL_ID" ] || [ "$MODEL_ID" = "list" ]; then
-    python3 - "$MANIFEST" <<'PY' 2>/dev/null || awk '/"id"/{print}' "$MANIFEST"
-import json, sys
-d = json.load(open(sys.argv[1]))
-print("Available models (quantisation: bf16):\n")
-print(f"  {'ID':<12} {'NAME':<32} {'SIZE':>8}  NOTES")
-for m in d["models"]:
-    gb = m["size"] / 1e9
-    note = "recommended" if m.get("recommended") else ""
-    print(f"  {m['id']:<12} {m['display_name']:<32} {gb:>6.1f}G  {note}")
-print("\nNot yet available:")
-for u in d.get("unavailable", []):
-    print(f"  {u['id']:<12} ({u['quantization']}) — {u.get('status','unavailable')}")
-print("\nUsage: ./scripts/download_model.sh <id> [bf16]")
-PY
+    printf 'Available models (quantisation: bf16):\n\n'
+    printf '  %-12s %-32s %8s  %s\n' "ID" "NAME" "SIZE" "NOTES"
+    for id in $(mf_all_ids); do
+        name="$(mf_str "$id" display_name)"
+        size="$(mf_num "$id" size)"
+        note=""
+        [ "$(mf_bool "$id" recommended)" = "true" ] && note="recommended"
+        if [ -n "$size" ] && [ "$size" -gt 0 ] 2>/dev/null; then
+            gb="$(awk -v s="$size" 'BEGIN { printf "%.1fG", s/1e9 }')"
+        else
+            gb="-"
+        fi
+        printf '  %-12s %-32s %8s  %s\n' "$id" "$name" "$gb" "$note"
+    done
+    printf '\nNot yet available:\n'
+    printf '  dev-q4        (q4) - unavailable\n'
+    printf '  dev-2604-q4   (q4) - unavailable\n'
+    printf '  base-q4       (q4) - unavailable\n'
+    printf '\nUsage: ./scripts/download_model.sh <id> [bf16]\n'
     exit 0
 fi
 
 # ---- resolve the entry ------------------------------------------------------
-read -r URL SHA SIZE FILENAME < <(python3 - "$MANIFEST" "$MODEL_ID" "$QUANT" <<'PY'
-import json, sys
-path, mid, quant = sys.argv[1:4]
-d = json.load(open(path))
-if quant != "bf16":
-    for u in d.get("unavailable", []):
-        if u["quantization"] == quant:
-            sys.exit(f"error: '{quant}' models are not available yet.\n"
-                     f"       {u.get('reason','')}")
-    sys.exit(f"error: unknown quantisation '{quant}' (only bf16 is available)")
-for m in d["models"]:
-    if m["id"] == mid:
-        print(m["download_url"], m["sha256"], m["size"], m["filename"])
-        break
-else:
-    ids = ", ".join(m["id"] for m in d["models"])
-    sys.exit(f"error: unknown model id '{mid}'.\n       available: {ids}")
-PY
-) || exit 1
+if [ "$QUANT" != "bf16" ]; then
+    if grep -q "\"quantization\": \"$QUANT\"" "$MANIFEST"; then
+        die "'$QUANT' models are not available yet.
+       The o1.c runtime currently supports only F32/F16/BF16 GGUF tensors."
+    fi
+    die "unknown quantisation '$QUANT' (only bf16 is available)"
+fi
 
-[ -n "${URL:-}" ] || die "could not resolve model '$MODEL_ID'"
+if ! mf_all_ids | grep -qx "$MODEL_ID"; then
+    die "unknown model id '$MODEL_ID'.
+       available: $(mf_all_ids | tr '\n' ' ')"
+fi
+
+URL="$(mf_str "$MODEL_ID" download_url)"
+SHA="$(mf_str "$MODEL_ID" sha256)"
+SIZE="$(mf_num "$MODEL_ID" size)"
+FILENAME="$(mf_str "$MODEL_ID" filename)"
+
+[ -n "$URL" ] && [ -n "$SHA" ] && [ -n "$FILENAME" ] \
+    || die "could not resolve model '$MODEL_ID' from $MANIFEST"
 
 mkdir -p "$DEST"
 OUT="$DEST/$FILENAME"

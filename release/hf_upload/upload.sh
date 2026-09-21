@@ -5,7 +5,8 @@
 # refuses to upload anything that does not match the recorded SHA256.
 #
 # Usage:
-#   HF_REPO=owner/repo ./release/hf_upload/upload.sh [--dry-run]
+#   ./release/hf_upload/upload.sh [--dry-run]
+#   HF_REPO=other/o1.c-models ./release/hf_upload/upload.sh
 #
 # Requires: huggingface_hub (hf CLI) and valid credentials (hf auth login,
 # or HF_TOKEN in the environment).
@@ -16,8 +17,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UPLOAD_DIR="$ROOT/release/hf_upload"
 ART_DIR="$ROOT/release/models"
 DEF="$ROOT/release/models.def.json"
+MANIFEST="$ROOT/models/manifest.json"
 
-HF_REPO="${HF_REPO:-}"
+# Default target comes from models/manifest.json (single source of truth),
+# falling back to the published namespace.
+if [ -z "${HF_REPO:-}" ] && [ -f "$MANIFEST" ]; then
+    HF_REPO="$(sed -n 's/.*"hf_release_repo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -1)"
+fi
+HF_REPO="${HF_REPO:-saggeseluca/o1.c-models}"
 
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
@@ -52,7 +59,7 @@ else
     die "credentials present but 'hf auth whoami' failed; not uploading"
 fi
 
-[ -n "$HF_REPO" ] || die "set HF_REPO=owner/repo (e.g. HF_REPO=myuser/o1.c-models)"
+[ -n "$HF_REPO" ] || die "set HF_REPO=owner/repo (e.g. HF_REPO=saggeseluca/o1.c-models)"
 echo "    target repository: $HF_REPO"
 
 # ------------------------------------------------------------- artifact check

@@ -147,6 +147,12 @@ Available models:
 | `dev` | HiDream-O1-Image-Dev | 28 | 17.6 GB |
 | `base` | HiDream-O1-Image (Base/Full) | 50 | 17.6 GB |
 
+The artifacts are published at
+[`saggeseluca/o1.c-models`](https://huggingface.co/saggeseluca/o1.c-models)
+on Hugging Face. The download script reads the URLs and checksums from
+[`models/manifest.json`](models/manifest.json) — no URL is hard-coded in the
+script, so you never need to know the repository path by hand.
+
 **Q4 is not available.** The runtime currently supports only F32/F16/BF16
 GGUF tensors, so there is no quantized release yet. Do not expect Q4 files.
 
@@ -445,7 +451,10 @@ authoritative model cards and citation.
 | `hidream-o1-dev-bf16.gguf` | `HiDream-ai/HiDream-O1-Image-Dev` | `c0bada0e…` | MIT |
 | `hidream-o1-base-bf16.gguf` | `HiDream-ai/HiDream-O1-Image` | `0b0901d9…` | MIT |
 
-See [`docs/RELEASE_MODELS.md`](docs/RELEASE_MODELS.md) for full provenance and
+The GGUF conversions are redistributed from
+[`saggeseluca/o1.c-models`](https://huggingface.co/saggeseluca/o1.c-models),
+which is **not** a replacement for the upstream repositories. See
+[`docs/RELEASE_MODELS.md`](docs/RELEASE_MODELS.md) for full provenance and
 reproduction commands.
 
 ## 19. License

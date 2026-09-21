@@ -19,6 +19,9 @@ This repository hosts **GGUF conversions** of the HiDream-O1-Image model
 family, packaged for the native **o1.c** inference engine (C/CUDA, no
 PyTorch required at runtime).
 
+> **Runtime: [github.com/luca-saggese/o1.c](https://github.com/luca-saggese/o1.c)**
+> — clone, build and run the engine to use these files.
+
 > **These are GGUF conversions for the native o1.c runtime.**
 >
 > **Original model authors: [HiDream-ai](https://huggingface.co/HiDream-ai).**
@@ -104,27 +107,47 @@ Execution profile derived from `hidream.profile`:
 
 ## How to use
 
-Install the o1.c engine, then download and run:
+These files are **only usable with the o1.c runtime** — a native C/CUDA
+inference engine that loads GGUF weights directly, with no PyTorch or Python
+at runtime.
+
+> **Engine repository: <https://github.com/luca-saggese/o1.c>**
+
+Clone the engine, build it, then download and run a model:
 
 ```bash
-# from an o1.c checkout
+# 1. get the engine
+git clone https://github.com/luca-saggese/o1.c.git
+cd o1.c
+
+# 2. check your GPU/CUDA/cuDNN toolchain and build
+./scripts/setup.sh
+make
+
+# 3. download a model from this repository (checksum-verified)
 ./scripts/download_model.sh dev-2604
 
+# 4. generate an image
 ./build/hidream --model-path models/hidream-o1-dev-2604-bf16.gguf \
     --prompt "a red fox in a snowy forest, golden hour" \
     --width 2048 --height 2048 --seed 42 --output fox.png
 ```
 
-You can also download these files directly and pass the path to
-`--model-path`. See the o1.c repository for installation and the full CLI
-reference.
+The engine README covers installation, the full CLI reference, image editing,
+multi-reference personalization, skeleton/layout conditioning, the
+OpenAI-compatible server and troubleshooting.
+
+You can also download the GGUF files from this repository directly and pass
+the local path to `--model-path`.
 
 ---
 
 ## Acknowledgements
 
 Model architecture, training and original weights: **HiDream-ai**.
-GGUF conversion and the o1.c runtime: the o1.c project.
+GGUF conversion and the native runtime: the
+[**o1.c**](https://github.com/luca-saggese/o1.c) project — these files require
+that engine to run.
 
 If you use these weights, please cite the original HiDream-O1-Image work as
 described in the upstream model cards.
