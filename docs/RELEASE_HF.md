@@ -1,11 +1,11 @@
 # R4 — Hugging Face release repository
 
-**Gate status: READY TO UPLOAD — target resolved, artifacts verified, upload
-requires credentials that are absent in this environment.**
+**Gate status: COMPLETE — published and verified end to end.**
 
-Per the release-hardening rules, this gate does **not** invent success. All
-release materials are staged and verified locally; publication requires a
-Hugging Face token that is not present here.
+The upload was performed by the maintainer (no Hugging Face credentials exist
+in the build environment). All published artifacts were then re-verified
+against `models/manifest.json` and downloaded back through the public
+downloader.
 
 ## 1. Target repository — RESOLVED
 
@@ -16,7 +16,7 @@ Hugging Face token that is not present here.
 | Visibility | public |
 | Gated | no |
 | URL | <https://huggingface.co/saggeseluca/o1.c-models> |
-| Current contents | `.gitattributes` only (empty repo) |
+| Current contents | 8 files: `.gitattributes`, `LICENSE`, `PROVENANCE.md`, `README.md`, `SHA256SUMS`, 3 × BF16 GGUF |
 
 Verified:
 
@@ -143,29 +143,59 @@ Test matrix executed:
 | Credentials + `--dry-run` | verifies checksums, lists 7 files, uploads nothing |
 | Credentials + real path (stub `hf`) | repo create + uploads, exit 0 |
 
-## 7. Post-upload verification
+## 7. Post-upload verification — EXECUTED
 
-Once published, confirm the public path is live and matches the manifest:
+The public path is live and matches the manifest.
 
 ```bash
 curl -sI https://huggingface.co/saggeseluca/o1.c-models/resolve/main/hidream-o1-dev-2604-bf16.gguf
 ./scripts/download_model.sh dev-2604 --dir /tmp/dl-check
 ```
 
-The downloader must print `OK` after SHA256 verification. Only then is R5
-considered validated against the live release.
+Results:
 
-## 8. Verdict
+| Check | Result |
+|-------|--------|
+| `api/models/saggeseluca/o1.c-models` | 200, public, not gated |
+| Published file list | 8 files (3 GGUF + `SHA256SUMS` + `LICENSE` + `PROVENANCE.md` + `README.md` + `.gitattributes`) |
+| Live `SHA256SUMS` vs `models/manifest.json` | **3/3 identical** |
+| HTTP HEAD on every published file | 200 |
+| Published GGUF sizes vs manifest `size` | match (`17,609,841,152` B each) |
+| `./scripts/download_model.sh dev-2604` (full 17.6 GB) | downloaded, **SHA256 OK** |
+| Engine load of the downloaded file | `PASS: generation` (1024×1024, 1 step) |
+
+## 8. Note on identical artifact sizes
+
+All three BF16 GGUFs are exactly `17,609,841,152` bytes. This is expected, not
+a packaging bug:
+
+* the three checkpoints share one architecture — **759 tensors**, all ggml
+  type **30 (BF16)**, with **identical tensor offsets** (`first = 0`,
+  `last = 17604469760`, max tensor end `17609778176`);
+* only the metadata header length differs (`62811` / `62801` / `62804` bytes)
+  because `general.name`, `hidream.variant` and `hidream.revision` have
+  different string lengths;
+* the converter pads the payload to `general.alignment = 256`
+  (`tools/hidream_convert.py`), so the trailing padding (165 / 175 / 172 bytes)
+  absorbs that difference and every file lands on the same total.
+
+The files are **not** duplicates: the tensor *values* differ, which is why the
+three SHA256 hashes are distinct. Spot-checked tensor digests (e.g.
+`model.visual.patch_embed.proj.weight`, `model.visual.pos_embed.weight`,
+`model.visual.blocks.0.attn.qkv.bias`) differ across all three artifacts.
+
+## 9. Verdict
 
 | Requirement | Status |
 |-------------|--------|
-| Model card crediting HiDream-ai, stating non-replacement | **PASS** (staged) |
+| Model card crediting HiDream-ai, stating non-replacement | **PASS** |
 | Source repo + immutable revision for every artifact | **PASS** |
 | License/provenance files | **PASS** (MIT) |
 | Publish only validated artifacts | **PASS** (checksum-gated) |
 | Target namespace resolved | **PASS** — `saggeseluca/o1.c-models` |
 | Manifest/downloader/README point at the real path | **PASS** |
-| Actual upload | **PENDING — no credentials in this environment** |
+| Actual upload | **PASS** — published by maintainer |
+| Live artifacts match the manifest | **PASS** — 3/3 SHA256 |
+| Public downloader round-trip | **PASS** — SHA256 OK, engine loads |
 
-**R4: READY, UPLOAD PENDING.** The only remaining step is `hf auth login`
-followed by `./release/hf_upload/upload.sh`.
+**R4: COMPLETE.**
