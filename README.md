@@ -394,10 +394,10 @@ is the generation itself, not a model reload.
 ### Startup
 
 ```sh
-export LD_LIBRARY_PATH=/home/lvx/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+source scripts/env.sh   # resolves CUDA_HOME / CUDNN_HOME / LD_LIBRARY_PATH
 
 ./build/hidream-server --port 8000 \
-  --model-path artifacts/models/hidream-o1-dev-bf16.gguf
+  --model-path models/hidream-o1-dev-2604-bf16.gguf
 ```
 
 Options:

@@ -5,19 +5,46 @@ NVCC    ?= nvcc
 CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra
 CPPFLAGS += -Iinclude -Isrc/io -Isrc/model -Isrc/cuda -Isrc/runtime -Isrc/image
 
-CUDA_HOME  ?= /usr/local/cuda
+# CUDA toolkit location. Override CUDA_HOME explicitly if it is not in a
+# standard place. Otherwise probe the usual locations, then fall back to nvcc.
+CUDA_HOME  ?= $(shell \
+    for d in /usr/local/cuda /usr/local/cuda-* /opt/cuda /usr; do \
+        if [ -f "$$d/include/cuda_runtime.h" ]; then echo "$$d"; break; fi; \
+    done)
+ifeq ($(strip $(CUDA_HOME)),)
+CUDA_HOME := $(shell dirname $$(dirname $$(command -v nvcc 2>/dev/null)) 2>/dev/null)
+endif
 CUDA_CPPFLAGS := -I$(CUDA_HOME)/include
-CUDA_LDFLAGS  := -L$(CUDA_HOME)/lib64 -lcudart -lnvrtc
+CUDA_LDFLAGS  := -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib -lcudart -lnvrtc
 CUBLAS_LDFLAGS := -lcublas -lcublasLt
 
 # cuDNN SDPA backend (M2 pre-baseline). The C++ Frontend is vendored under
 # third_party/cudnn-frontend (v1.22.1, recommended for cuDNN 9.20). The
-# runtime libcudnn.so comes from the nvidia-cudnn pip package (no Python in
-# the runtime; only the .so is linked). Override CUDNN_HOME to point at a
-# native cuDNN install if available.
-CUDNN_HOME ?= /home/lvx/.local/lib/python3.12/site-packages/nvidia/cudnn
-CUDNN_CPPFLAGS := -Ithird_party/cudnn-frontend/include -I$(CUDNN_HOME)/include
-CUDNN_LDFLAGS  := -L$(CUDNN_HOME)/lib -lcudnn
+# runtime libcudnn.so must be discoverable at link time.
+#
+# Set CUDNN_HOME=/path/to/cudnn to select a specific installation. Otherwise
+# standard locations are probed, including CUDA_PATH, /usr/local/cuda,
+# /usr, /usr/local/cudnn*, and the nvidia-cudnn wheel layout. Run
+# scripts/setup.sh for a diagnosis of what was found.
+CUDNN_HOME ?= $(shell \
+    for d in "$$CUDNN_HOME" "$$CUDA_PATH" /usr/local/cudnn /usr/local/cudnn-* \
+             /usr/local/cuda /opt/cudnn /usr /usr/local; do \
+        [ -n "$$d" ] || continue; \
+        if [ -f "$$d/include/cudnn.h" ] || [ -f "$$d/include/cudnn_version.h" ]; then \
+            echo "$$d"; break; fi; \
+    done)
+ifeq ($(strip $(CUDNN_HOME)),)
+CUDNN_HOME := $(shell \
+    for d in $$(ls -d /usr/local/lib/python3*/dist-packages/nvidia/cudnn \
+                       /usr/local/lib/python3*/site-packages/nvidia/cudnn \
+                       $$HOME/.local/lib/python3*/site-packages/nvidia/cudnn \
+                       /usr/lib/python3*/dist-packages/nvidia/cudnn 2>/dev/null); do \
+        if [ -f "$$d/include/cudnn.h" ] || [ -f "$$d/include/cudnn_version.h" ]; then \
+            echo "$$d"; break; fi; \
+    done)
+endif
+CUDNN_CPPFLAGS := -Ithird_party/cudnn-frontend/include $(if $(strip $(CUDNN_HOME)),-I$(CUDNN_HOME)/include)
+CUDNN_LDFLAGS  := $(if $(strip $(CUDNN_HOME)),-L$(CUDNN_HOME)/lib -L$(CUDNN_HOME)/lib64) -lcudnn
 
 CORE_SRCS := src/model/model.c src/io/json.c src/io/sha256.c src/io/safetensors.c src/io/gguf.c
 
