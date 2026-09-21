@@ -1,0 +1,47 @@
+{
+  "_comment": "Reproducible conversion definitions for the o1.c BF16 release GGUFs. Consumed by scripts/build_release_models.sh. Upstream revisions are immutable commit SHAs, never branch names.",
+  "engine_min_layout_version": 1,
+  "alignment": 256,
+  "converter": "tools/hidream_convert.py",
+  "models": [
+    {
+      "id": "dev-2604",
+      "display_name": "HiDream-O1-Image-Dev-2604",
+      "filename": "hidream-o1-dev-2604-bf16.gguf",
+      "hf_repo": "HiDream-ai/HiDream-O1-Image-Dev-2604",
+      "upstream_revision": "b6acc2fe452b3120430620dc4354fa442ee081ea",
+      "profile": "dev",
+      "variant": "dev-2604",
+      "quantization": "bf16",
+      "source_dir": "models/dev",
+      "recommended": true,
+      "default_steps": 28
+    },
+    {
+      "id": "dev",
+      "display_name": "HiDream-O1-Image-Dev",
+      "filename": "hidream-o1-dev-bf16.gguf",
+      "hf_repo": "HiDream-ai/HiDream-O1-Image-Dev",
+      "upstream_revision": "c0bada0e15c54a9f96a6d1ecc35575b32bc21544",
+      "profile": "dev",
+      "variant": "dev",
+      "quantization": "bf16",
+      "source_dir": "models/dev-orig",
+      "recommended": false,
+      "default_steps": 28
+    },
+    {
+      "id": "base",
+      "display_name": "HiDream-O1-Image (Base/Full)",
+      "filename": "hidream-o1-base-bf16.gguf",
+      "hf_repo": "HiDream-ai/HiDream-O1-Image",
+      "upstream_revision": "0b0901d99f200389e138c61946af1185f5f49a13",
+      "profile": "base",
+      "variant": "base",
+      "quantization": "bf16",
+      "source_dir": "models/base",
+      "recommended": false,
+      "default_steps": 50
+    }
+  ]
+}

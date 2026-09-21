@@ -55,7 +55,8 @@ int main(int argc, char **argv) {
     CHECK(f.alignment == 256, "alignment %llu != 256", (unsigned long long)f.alignment);
     CHECK(f.n_tensors > 0, "no tensors");
     CHECK(f.arch && strcmp(f.arch, "hidream_o1") == 0, "arch mismatch");
-    CHECK(f.profile && strcmp(f.profile, "dev") == 0, "profile mismatch");
+    CHECK(f.profile && (!strcmp(f.profile, "dev") || !strcmp(f.profile, "base")),
+          "profile mismatch");
     CHECK(f.dtype && strcmp(f.dtype, "bf16") == 0, "dtype mismatch");
     CHECK(f.num_layers == 36, "num_layers %lld != 36", (long long)f.num_layers);
     CHECK(f.name && f.name[0], "general.name missing");

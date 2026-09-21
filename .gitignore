@@ -42,3 +42,7 @@ venv/
 /*-output.png
 /girl2.json
 /girl2.png
+
+# --- Release artifacts (definitions are tracked; weights are not) ---
+/release/models/
+/models/dev-orig/
