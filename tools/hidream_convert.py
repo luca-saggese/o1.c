@@ -207,9 +207,14 @@ def main():
     ap.add_argument("--source", required=True, help="model dir with safetensors shards")
     ap.add_argument("--output", required=True, help="output .gguf path")
     ap.add_argument("--profile", default="dev")
+    ap.add_argument("--variant", default=None,
+                    help="provenance variant: dev | dev-2604 | base (default: profile)")
+    ap.add_argument("--quantization", default="bf16")
     ap.add_argument("--revision", default="unknown")
     ap.add_argument("--architecture", default="hidream_o1")
     args = ap.parse_args()
+
+    variant = args.variant or args.profile
 
     tensors = load_shard_index(args.source)
     names = production_order(tensors)
@@ -223,11 +228,13 @@ def main():
     # metadata KV pairs
     kvs = [
         ("general.architecture", args.architecture),
-        ("general.name", f"HiDream-O1-Image-{args.profile}"),
+        ("general.name", f"HiDream-O1-Image-{variant}"),
         ("general.alignment", str(ALIGNMENT)),
         ("hidream.profile", args.profile),
+        ("hidream.variant", variant),
         ("hidream.revision", args.revision),
         ("hidream.dtype", "bf16"),
+        ("hidream.quantization", args.quantization),
         ("hidream.num_layers", "36"),
         ("hidream.layout_version", "1"),
         ("hidream.source_format", "safetensors"),

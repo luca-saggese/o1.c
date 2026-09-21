@@ -1,4 +1,5 @@
 #include "hidream.h"
+#include "gguf.h"
 #include "json.h"
 
 #include <stdarg.h>
@@ -132,23 +133,97 @@ hd_status hd_profile_load(const char *profile_name, const char *config_dir,
 
     if (st == HD_OK) {
         out->profile = str_dup(p);
+        out->variant = str_dup(p);
         out->hf_repo = str_dup(repo);
         out->immutable_revision = str_dup(rev);
         out->local_path = str_dup(lp);
         out->model_type = str_dup(mt);
         out->dtype = str_dup(dt ? dt : "");
+        out->quantization = str_dup("bf16");
         out->model_type_hf = str_dup(mth ? mth : "");
+        out->name = str_dup("");
+        out->layout_version = 1;
         out->num_inference_steps = (int)steps;
     }
     hd_json_free(root);
     return st;
 }
 
+/* Map a GGUF execution profile to the frozen recipe defaults. */
+static int profile_steps(const char *profile) {
+    return strcmp(profile, "base") == 0 ? 50 : 28;
+}
+
+hd_status hd_profile_from_gguf(const char *model_path, hd_profile *out) {
+    memset(out, 0, sizeof(*out));
+    if (!model_path || !*model_path) {
+        set_err("model path is empty");
+        return HD_ERR_MISSING;
+    }
+
+    hd_gguf_file g;
+    hd_status st = hd_gguf_open(model_path, &g);
+    if (st != HD_OK) {
+        set_err("%s: %s", model_path, hd_gguf_last_error());
+        return st;
+    }
+
+    const char *arch = g.arch;
+    const char *prof = g.profile;
+    const char *rev = g.revision;
+    const char *dt = g.dtype;
+    const char *var = g.variant;
+
+    if (!arch || strcmp(arch, "hidream_o1") != 0) {
+        set_err("%s: unsupported general.architecture '%s' (expected hidream_o1)",
+                model_path, arch ? arch : "(missing)");
+        st = HD_ERR_PROFILE;
+    } else if (!prof || (strcmp(prof, "dev") != 0 && strcmp(prof, "base") != 0)) {
+        set_err("%s: unsupported hidream.profile '%s' (expected dev or base)",
+                model_path, prof ? prof : "(missing)");
+        st = HD_ERR_PROFILE;
+    } else if (!rev || strlen(rev) < 40) {
+        set_err("%s: hidream.revision must be a full 40-char upstream SHA", model_path);
+        st = HD_ERR_PROFILE;
+    } else if (!dt || !*dt) {
+        set_err("%s: missing hidream.dtype", model_path);
+        st = HD_ERR_PROFILE;
+    } else if (g.num_layers <= 0) {
+        set_err("%s: missing or invalid hidream.num_layers", model_path);
+        st = HD_ERR_PROFILE;
+    } else if (g.layout_version <= 0) {
+        set_err("%s: missing or invalid hidream.layout_version", model_path);
+        st = HD_ERR_PROFILE;
+    } else if (var && strcmp(var, "dev") && strcmp(var, "dev-2604") &&
+               strcmp(var, "base")) {
+        set_err("%s: unsupported hidream.variant '%s'", model_path, var);
+        st = HD_ERR_PROFILE;
+    }
+
+    if (st == HD_OK) {
+        out->profile = str_dup(prof);
+        out->variant = str_dup(var ? var : prof);
+        out->hf_repo = str_dup("");
+        out->immutable_revision = str_dup(rev);
+        out->local_path = str_dup(model_path);
+        out->model_type = str_dup(strcmp(prof, "base") == 0 ? "full" : "dev");
+        out->dtype = str_dup(dt);
+        out->quantization = str_dup(g.quantization ? g.quantization : "bf16");
+        out->model_type_hf = str_dup("");
+        out->name = str_dup(g.name ? g.name : "");
+        out->layout_version = g.layout_version;
+        out->num_inference_steps = profile_steps(prof);
+    }
+    hd_gguf_close(&g);
+    return st;
+}
+
 void hd_profile_free(hd_profile *p) {
     if (!p) return;
-    free(p->profile); free(p->hf_repo); free(p->immutable_revision);
+    free(p->profile); free(p->variant); free(p->hf_repo);
+    free(p->immutable_revision);
     free(p->local_path); free(p->model_type); free(p->dtype);
-    free(p->model_type_hf);
+    free(p->quantization); free(p->model_type_hf); free(p->name);
     memset(p, 0, sizeof(*p));
 }
 

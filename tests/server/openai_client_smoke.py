@@ -3,7 +3,7 @@
 
 Requires a running `build/hidream-server` and the `openai` package:
 
-    build/hidream-server --port 8000 --model dev &
+    build/hidream-server --port 8000 --model-path artifacts/models/hidream-o1-dev-bf16.gguf &
     python3 tests/server/openai_client_smoke.py --base-url http://127.0.0.1:8000/v1
 
 The script exercises the official client end to end (no custom HTTP code):

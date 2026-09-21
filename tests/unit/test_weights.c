@@ -3,6 +3,7 @@
 #include "weights.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int failures = 0;
@@ -187,8 +188,38 @@ static void test_base_profile_supported(void) {
         CHECK(strcmp(p.local_path, "models/base") == 0, "base local path preserved");
         CHECK(p.immutable_revision && strlen(p.immutable_revision) == 40,
               "base revision is an immutable 40-char sha");
+        CHECK(p.variant && strcmp(p.variant, "base") == 0, "base variant set");
         hd_profile_free(&p);
     }
+}
+
+/* R1: the public interface resolves the runtime profile from GGUF metadata. */
+static void test_profile_from_gguf(void) {
+    const char *path = getenv("O1_TEST_GGUF");
+    if (!path || !*path) {
+        printf("skip: O1_TEST_GGUF not set (profile-from-gguf)\n");
+        return;
+    }
+    hd_profile p;
+    hd_status st = hd_profile_from_gguf(path, &p);
+    CHECK(st == HD_OK, "profile resolves from GGUF metadata");
+    if (st != HD_OK) { printf("  err: %s\n", hd_last_error()); return; }
+    CHECK(p.profile && (!strcmp(p.profile, "dev") || !strcmp(p.profile, "base")),
+          "resolved profile is dev or base");
+    CHECK(p.variant && p.variant[0], "resolved variant is set");
+    CHECK(p.immutable_revision && strlen(p.immutable_revision) >= 40,
+          "resolved revision is a full upstream sha");
+    CHECK(p.dtype && p.dtype[0], "resolved dtype is set");
+    CHECK(p.layout_version > 0, "resolved layout_version is set");
+    CHECK(p.num_inference_steps == (!strcmp(p.profile, "base") ? 50 : 28),
+          "resolved steps match the execution profile");
+    CHECK(p.local_path && strcmp(p.local_path, path) == 0,
+          "resolved local_path is the GGUF path");
+    hd_profile_free(&p);
+
+    hd_profile bad;
+    st = hd_profile_from_gguf("/nonexistent-model.gguf", &bad);
+    CHECK(st != HD_OK, "missing GGUF fails closed");
 }
 
 int main(void) {
@@ -197,6 +228,7 @@ int main(void) {
     test_probes();
     test_device_placement();
     test_base_profile_supported();
+    test_profile_from_gguf();
 
     if (failures) {
         printf("\n%d assertion(s) failed\n", failures);

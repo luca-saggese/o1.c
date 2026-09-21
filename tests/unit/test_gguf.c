@@ -47,6 +47,10 @@ int main(int argc, char **argv) {
            f.arch ? f.arch : "?", f.profile ? f.profile : "?",
            f.revision ? f.revision : "?", f.dtype ? f.dtype : "?",
            (long long)f.num_layers);
+    printf("  name=%s variant=%s quantization=%s layout_version=%lld\n",
+           f.name ? f.name : "?", f.variant ? f.variant : "?",
+           f.quantization ? f.quantization : "?",
+           (long long)f.layout_version);
 
     CHECK(f.alignment == 256, "alignment %llu != 256", (unsigned long long)f.alignment);
     CHECK(f.n_tensors > 0, "no tensors");
@@ -54,6 +58,12 @@ int main(int argc, char **argv) {
     CHECK(f.profile && strcmp(f.profile, "dev") == 0, "profile mismatch");
     CHECK(f.dtype && strcmp(f.dtype, "bf16") == 0, "dtype mismatch");
     CHECK(f.num_layers == 36, "num_layers %lld != 36", (long long)f.num_layers);
+    CHECK(f.name && f.name[0], "general.name missing");
+    /* variant/quantization are optional in legacy packs: the reader falls
+     * back to profile/bf16. When present they must be non-empty. */
+    CHECK(!f.variant || f.variant[0], "hidream.variant present but empty");
+    CHECK(!f.quantization || f.quantization[0], "hidream.quantization present but empty");
+    CHECK(f.layout_version > 0, "hidream.layout_version missing");
 
     /* Offsets must be 256-aligned and monotonically increasing. */
     uint64_t prev_end = 0;

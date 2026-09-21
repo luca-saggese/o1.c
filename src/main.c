@@ -117,37 +117,36 @@ static void progress_step_cb(int step, int total, void *user) {
 static void usage(const char *argv0) {
     printf("usage: %s [options]\n", argv0);
     printf("\n");
-    printf("M1.8 production prompt-to-image generation:\n");
-    printf("  --model dev|base        profile to use (default: dev)\n");
+    printf("HiDream-O1 native image generation:\n");
+    printf("  --model-path PATH       production GGUF model file (public interface;\n");
+    printf("                          profile is inferred from the GGUF metadata)\n");
     printf("  --prompt TEXT           user prompt\n");
     printf("  --mode t2i|edit|personalize|...   generation mode (default: t2i)\n");
-    printf("  --ref-image PATH        reference image (repeatable, edit/personalize)\n");
+    printf("  --ref-image PATH        reference image (repeatable, max %d)\n",
+           HD_SEQ_MAX_REFS);
     printf("  --ref-image NAME=PATH   named reference; use @NAME in --prompt\n");
+    printf("  --keep-original-aspect  single ref: derive output dims from ref\n");
+    printf("  --layout-bboxes JSON    layout bboxes for personalize+layout\n");
     printf("  --verbose               print reference alias mapping / expanded prompt\n");
     printf("  --no-progress           disable the generation progress bar\n");
     printf("  --width N               output width (default: 1024)\n");
     printf("  --height N              output height (default: 1024)\n");
-    printf("  --steps N               inference steps (default per profile)\n");
+    printf("  --steps N               inference steps (default per model profile)\n");
     printf("  --seed N                RNG seed (default: 123456)\n");
-    printf("  --scheduler flash|default|flow_match   (default per profile)\n");
-    printf("  --guidance F            CFG scale (default per profile)\n");
-    printf("  --shift F               scheduler shift (default per profile)\n");
+    printf("  --scheduler flash|default|flow_match   (default per model profile)\n");
+    printf("  --guidance F            CFG scale (default per model profile)\n");
+    printf("  --shift F               scheduler shift (default per model profile)\n");
     printf("  --output PATH           output PNG path (default: output.png)\n");
-    printf("  --model-dir DIR         override profile local_path\n");
     printf("  --device N              CUDA device index (default: 0)\n");
     printf("  --noise-start F         noise_scale_start (default 8.0)\n");
     printf("  --noise-end F           noise_scale_end (default 8.0)\n");
     printf("  --noise-clip F          noise_clip_std (default 8.0)\n");
     printf("  --lora FILE[:MULT]      apply LoRA adapter (repeatable)\n");
-    printf("  --ref-image PATH        reference image (repeatable, max %d)\n",
-           HD_SEQ_MAX_REFS);
-    printf("  --keep-original-aspect  single ref: derive output dims from ref\n");
-    printf("  --layout-bboxes JSON    layout bboxes for personalize+layout\n");
     printf("\n");
-    printf("M1.0 profile validation (default):\n");
+    printf("Internal / debug (safetensors development checkouts):\n");
+    printf("  --model dev|base        profile name (internal; prefer --model-path)\n");
+    printf("  --model-dir DIR         safetensors directory (internal)\n");
     printf("  --config-dir DIR        config directory (default: config)\n");
-    printf("\n");
-    printf("M1.1 weight ingestion (V0, no model forward):\n");
     printf("  --inventory             cross-check shards against frozen manifest\n");
     printf("  --probe                 fingerprint representative tensors\n");
     printf("  --to-device             load weights into deterministic CUDA buffers\n");
@@ -175,7 +174,7 @@ static void json_escape(FILE *f, const char *s) {
 }
 
 static int write_metadata(const char *png_path, const hd_generation_request *req,
-                          const char *engine_commit) {
+                          const char *variant, const char *engine_commit) {
     char meta_path[1024];
     size_t n = strlen(png_path);
     if (n < 4 || strcmp(png_path + n - 4, ".png")) return -1;
@@ -184,7 +183,7 @@ static int write_metadata(const char *png_path, const hd_generation_request *req
     FILE *f = fopen(meta_path, "w");
     if (!f) return -1;
     fprintf(f, "{\n");
-    fprintf(f, "  \"model\": \"%s\",\n", req->profile);
+    fprintf(f, "  \"model\": \"%s\",\n", variant ? variant : req->profile);
     fprintf(f, "  \"mode\": \"%s\",\n", hd_mode_name(req->mode));
     fprintf(f, "  \"width\": %d,\n", req->width);
     fprintf(f, "  \"height\": %d,\n", req->height);
@@ -207,6 +206,7 @@ int main(int argc, char **argv) {
     const char *profile = "dev";
     const char *config_dir = "config";
     const char *model_dir = NULL;
+    const char *model_path = NULL;
     int device_id = 0;
     int do_inventory = 0, do_probe = 0, do_to_device = 0;
 
@@ -231,7 +231,9 @@ int main(int argc, char **argv) {
     const char *layout_bboxes = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--model-path") == 0 && i + 1 < argc) {
+            model_path = argv[++i];
+        } else if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             profile = argv[++i];
         } else if (strcmp(argv[i], "--config-dir") == 0 && i + 1 < argc) {
             config_dir = argv[++i];
@@ -344,7 +346,6 @@ int main(int argc, char **argv) {
         hd_generation_request req;
         memset(&req, 0, sizeof(req));
         req.prompt = prompt;
-        req.profile = profile;
         req.mode = mode;
         req.width = width;
         req.height = height;
@@ -394,27 +395,35 @@ int main(int argc, char **argv) {
             req.lora = &lora_cfg;
         }
 
+        hd_profile p;
+        hd_status st;
+        if (model_path) {
+            st = hd_profile_from_gguf(model_path, &p);
+        } else {
+            st = hd_profile_load(profile, config_dir, &p);
+        }
+        if (st != HD_OK) {
+            fprintf(stderr, "FAIL: %s\n", hd_last_error());
+            return 1;
+        }
+        req.profile = p.profile;
+        const char *dir = model_path ? model_path
+                                     : (model_dir ? model_dir : p.local_path);
+
         hd_request_defaults(&req);
         if (req.width <= 0) req.width = 1024;
         if (req.height <= 0) req.height = 1024;
         if (!output) output = "output.png";
-        hd_status st = hd_request_validate(&req);
+        st = hd_request_validate(&req);
         if (st != HD_OK) {
             fprintf(stderr, "FAIL: %s\n", hd_last_error());
+            hd_profile_free(&p);
             return 1;
         }
-
-        hd_profile p;
-        st = hd_profile_load(profile, config_dir, &p);
-        if (st != HD_OK) {
-            fprintf(stderr, "FAIL: %s\n", hd_last_error());
-            return 1;
-        }
-        const char *dir = model_dir ? model_dir : p.local_path;
 
         setvbuf(stdout, NULL, _IONBF, 0);
         printf("[hidream] generating %dx%d %d-step %s (seed %llu, scheduler %s)\n",
-               req.width, req.height, req.steps, req.profile,
+               req.width, req.height, req.steps, p.variant ? p.variant : req.profile,
                (unsigned long long)req.seed, hd_scheduler_name(req.scheduler));
 
         O1_TIMING_BEGIN("REQUEST_TOTAL");
@@ -464,7 +473,7 @@ int main(int argc, char **argv) {
             }
             fclose(headf);
         }
-        if (write_metadata(output, &req, engine_commit[0] ? engine_commit : NULL) != 0)
+        if (write_metadata(output, &req, p.variant, engine_commit[0] ? engine_commit : NULL) != 0)
             fprintf(stderr, "warn: metadata write failed\n");
 
         O1_TIMING_END("MODEL_STARTUP");
@@ -479,6 +488,11 @@ int main(int argc, char **argv) {
         printf("PASS: generation %s (%dx%d)\n", output, ow, oh);
         hd_profile_free(&p);
         return 0;
+    }
+
+    if (model_path) {
+        fprintf(stderr, "FAIL: --model-path requires --prompt\n");
+        return 2;
     }
 
     hd_status st = hd_validate_profile(config_dir, profile);

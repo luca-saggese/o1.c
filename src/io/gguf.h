@@ -41,10 +41,14 @@ typedef struct {
     uint64_t tensor_data_off; /* absolute file offset of tensor_data */
     uint64_t payload_bytes;
     char *arch;               /* general.architecture */
+    char *name;               /* general.name */
     char *profile;            /* hidream.profile */
+    char *variant;            /* hidream.variant */
     char *revision;           /* hidream.revision */
     char *dtype;              /* hidream.dtype */
+    char *quantization;       /* hidream.quantization */
     int64_t num_layers;       /* hidream.num_layers */
+    int64_t layout_version;   /* hidream.layout_version */
 } hd_gguf_file;
 
 /* Parses the GGUF header + tensor table. No payload I/O. */

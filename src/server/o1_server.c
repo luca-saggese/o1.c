@@ -2175,9 +2175,7 @@ static void usage(FILE *f) {
         "\n"
         "Usage: hidream-server [options]\n"
         "\n"
-        "  --model dev|base        model profile to keep resident (default dev)\n"
-        "  --model-dir PATH        weights directory or .gguf file\n"
-        "  --config-dir DIR        profile config directory (default config)\n"
+        "  --model-path PATH       production GGUF model file (required)\n"
         "  --device N              CUDA device index (default 0)\n"
         "  --host HOST             listen address (default 127.0.0.1)\n"
         "  --port PORT             listen port (default 8000)\n"
@@ -2186,7 +2184,12 @@ static void usage(FILE *f) {
         "  --queue-depth N         pending generation jobs (default 8)\n"
         "  --api-key KEY           require Authorization: Bearer KEY\n"
         "  --lora FILE[:MULT]      merge a LoRA adapter at startup (repeatable)\n"
-        "  -h, --help              show this help\n");
+        "  -h, --help              show this help\n"
+        "\n"
+        "Internal / debug:\n"
+        "  --model dev|base        profile name (internal; prefer --model-path)\n"
+        "  --model-dir PATH        safetensors directory (internal)\n"
+        "  --config-dir DIR        profile config directory (default config)\n");
 }
 
 static bool parse_lora_spec(const char *arg, hd_lora_spec *out) {
@@ -2209,6 +2212,7 @@ static bool parse_lora_spec(const char *arg, hd_lora_spec *out) {
 int main(int argc, char **argv) {
     const char *profile = "dev";
     const char *model_dir = NULL;
+    const char *model_path = NULL;
     const char *config_dir = "config";
     int device_id = 0;
     const char *host = "127.0.0.1";
@@ -2225,6 +2229,8 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
             usage(stdout);
             return 0;
+        } else if (!strcmp(a, "--model-path") && i + 1 < argc) {
+            model_path = argv[++i];
         } else if (!strcmp(a, "--model") && i + 1 < argc) {
             profile = argv[++i];
         } else if (!strcmp(a, "--model-dir") && i + 1 < argc) {
@@ -2270,7 +2276,21 @@ int main(int argc, char **argv) {
     }
     if (queue_depth <= 0) queue_depth = 1;
 
-    if (!model_dir) {
+    /* Resolve the runtime profile. The public interface is a single
+     * --model-path pointing at a production GGUF; the profile is inferred
+     * from its metadata. --model/--model-dir remain for internal debug. */
+    hd_profile resolved;
+    memset(&resolved, 0, sizeof(resolved));
+    int have_resolved = 0;
+    if (model_path) {
+        if (hd_profile_from_gguf(model_path, &resolved) != HD_OK) {
+            fprintf(stderr, "hidream-server: %s\n", hd_last_error());
+            return 2;
+        }
+        have_resolved = 1;
+        profile = resolved.profile;
+        model_dir = model_path;
+    } else if (!model_dir) {
         model_dir = strcmp(profile, "base") == 0
                         ? "artifacts/models/hidream-o1-base-bf16.gguf"
                         : "artifacts/models/hidream-o1-dev-bf16.gguf";
@@ -2393,6 +2413,7 @@ int main(int argc, char **argv) {
     hd_generation_engine_close(g_engine);
     g_engine = NULL;
     free(g_queue);
+    if (have_resolved) hd_profile_free(&resolved);
     return 0;
 }
 #endif /* O1_SERVER_TEST */

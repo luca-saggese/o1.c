@@ -133,10 +133,18 @@ static int gguf_real_parse(gguf_buf *b, uint64_t n_kv, uint64_t n_tensors,
             char *v = NULL;
             if (buf_str(b, &v) != 0) { free(key); return -1; }
             out->arch = v;
+        } else if (strcmp(key, "general.name") == 0 && vtype == 8) {
+            char *v = NULL;
+            if (buf_str(b, &v) != 0) { free(key); return -1; }
+            out->name = v;
         } else if (strcmp(key, "hidream.profile") == 0 && vtype == 8) {
             char *v = NULL;
             if (buf_str(b, &v) != 0) { free(key); return -1; }
             out->profile = v;
+        } else if (strcmp(key, "hidream.variant") == 0 && vtype == 8) {
+            char *v = NULL;
+            if (buf_str(b, &v) != 0) { free(key); return -1; }
+            out->variant = v;
         } else if (strcmp(key, "hidream.revision") == 0 && vtype == 8) {
             char *v = NULL;
             if (buf_str(b, &v) != 0) { free(key); return -1; }
@@ -145,10 +153,19 @@ static int gguf_real_parse(gguf_buf *b, uint64_t n_kv, uint64_t n_tensors,
             char *v = NULL;
             if (buf_str(b, &v) != 0) { free(key); return -1; }
             out->dtype = v;
+        } else if (strcmp(key, "hidream.quantization") == 0 && vtype == 8) {
+            char *v = NULL;
+            if (buf_str(b, &v) != 0) { free(key); return -1; }
+            out->quantization = v;
         } else if (strcmp(key, "hidream.num_layers") == 0 && vtype == 8) {
             char *v = NULL;
             if (buf_str(b, &v) != 0) { free(key); return -1; }
             out->num_layers = atoll(v ? v : "0");
+            free(v);
+        } else if (strcmp(key, "hidream.layout_version") == 0 && vtype == 8) {
+            char *v = NULL;
+            if (buf_str(b, &v) != 0) { free(key); return -1; }
+            out->layout_version = atoll(v ? v : "0");
             free(v);
         } else {
             if (buf_skip_value(b, vtype) != 0) { free(key); return -1; }
@@ -291,9 +308,12 @@ void hd_gguf_close(hd_gguf_file *f) {
     if (!f) return;
     free(f->path);
     free(f->arch);
+    free(f->name);
     free(f->profile);
+    free(f->variant);
     free(f->revision);
     free(f->dtype);
+    free(f->quantization);
     for (int64_t i = 0; i < f->n_tensors; i++) free(f->tensors[i].name);
     free(f->tensors);
     memset(f, 0, sizeof(*f));

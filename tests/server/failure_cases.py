@@ -3,7 +3,7 @@
 
 Requires a running `build/hidream-server`:
 
-    build/hidream-server --port 8000 --model dev &
+    build/hidream-server --port 8000 --model-path artifacts/models/hidream-o1-dev-bf16.gguf &
     python3 tests/server/failure_cases.py --base-url http://127.0.0.1:8000
 
 Every case asserts the HTTP status and the OpenAI error envelope

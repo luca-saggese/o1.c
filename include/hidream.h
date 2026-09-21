@@ -63,19 +63,29 @@ int64_t hd_numel(const int64_t *shape, int rank);
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    char *profile;              /* "dev" or "base" */
+    char *profile;              /* execution profile: "dev" or "base" */
+    char *variant;              /* provenance: "dev" | "dev-2604" | "base" */
     char *hf_repo;
     char *immutable_revision;
-    char *local_path;           /* relative to project root */
+    char *local_path;           /* relative to project root, or the GGUF path */
     char *model_type;           /* "dev" or "full" */
     char *dtype;                /* raw dtype string from config */
+    char *quantization;         /* "bf16" | "q4_0" | ... */
     char *model_type_hf;        /* e.g. "qwen3_vl" */
+    char *name;                 /* general.name from GGUF metadata */
+    int64_t layout_version;     /* hidream.layout_version */
     int num_inference_steps;
 } hd_profile;
 
 hd_status hd_profile_load(const char *profile_name,
                           const char *config_dir,
                           hd_profile *out);
+
+/* Resolve the runtime profile from a production GGUF file's metadata.
+ * Requires general.architecture, hidream.profile, hidream.revision,
+ * hidream.dtype, hidream.num_layers and hidream.layout_version. */
+hd_status hd_profile_from_gguf(const char *model_path, hd_profile *out);
+
 void hd_profile_free(hd_profile *p);
 
 /* ------------------------------------------------------------------ */

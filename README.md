@@ -129,10 +129,11 @@ python3 tools/hidream_convert.py \
     --revision b6acc2fe452b3120430620dc4354fa442ee081ea
 ```
 
-Then point the engine at the pack with `--model-dir`:
+Then point the engine at the pack with `--model-path`; the runtime profile is
+inferred from the GGUF metadata:
 
 ```sh
-./build/hidream --model dev --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
     --prompt "a teapot" --steps 28 --seed 123456 --output out.png
 ```
 
@@ -153,7 +154,8 @@ round-trip against the source safetensors.
 
 ```
 build/hidream [options]
-  --model dev|base        profile to use (default: dev)
+  --model-path PATH       production GGUF weight pack (profile inferred
+                          from GGUF metadata; this is the public interface)
   --prompt TEXT           user prompt
   --mode t2i|edit|personalize|...   generation mode (default: t2i)
   --ref-image PATH        reference image (repeatable, max 20)
@@ -174,16 +176,19 @@ build/hidream [options]
   --noise-clip F          noise_clip_std (default 8.0)
   --lora FILE[:MULT]      apply LoRA adapter (repeatable)
   --output PATH           output PNG path (default: output.png)
+  --device N              CUDA device index (default: 0)
+
+Internal / debug only:
+  --model dev|base        safetensors execution profile (default: dev)
   --model-dir DIR         override profile local_path; a path ending in
                           .gguf loads the materialized GGUF weight pack
-  --device N              CUDA device index (default: 0)
 ```
 
 Example:
 
 ```sh
-./build/hidream --model dev --prompt "a teapot" --steps 28 --seed 123456 \
-  --output out.png
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
+  --prompt "a teapot" --steps 28 --seed 123456 --output out.png
 ```
 
 ## Named reference images
@@ -192,7 +197,8 @@ References can carry an optional semantic **name** with `--ref-image NAME=PATH`,
 and the prompt can refer to them with `@NAME`:
 
 ```sh
-./build/hidream --model dev --mode personalize \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode personalize \
   --ref-image person=person.jpg \
   --ref-image shirt=shirt.jpg \
   --prompt '@person wearing @shirt' \
@@ -204,7 +210,8 @@ the command line), so `@ref1`, `@ref2`, … always work, with or without an
 explicit name:
 
 ```sh
-./build/hidream --model dev --mode personalize \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
+  --mode personalize \
   --ref-image face.jpg --ref-image clothes.jpg \
   --prompt 'Use the identity from @ref1 and the clothes from @ref2' \
   --steps 28 --seed 123456 --output out.png
@@ -262,7 +269,7 @@ repository root after building `build/hidream`.
 | Preserve source aspect ratio | `--keep-original-aspect` | [`edit/test.jpg`](example_assets/edit/test.jpg) | — |
 
 The examples use the materialized Dev GGUF at
-`artifacts/models/hidream-o1-dev-bf16.gguf`. Omit `--model-dir` to use the
+`artifacts/models/hidream-o1-dev-bf16.gguf`. Omit `--model-path` to use the
 path configured by the selected profile.
 
 > **Use the full Dev schedule for image-quality examples.** `--steps 1` is
@@ -273,8 +280,7 @@ path configured by the selected profile.
 ### Text-to-image (Dev)
 
 ```sh
-./build/hidream --model dev \
-  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
   --prompt "A dog holds a sign that says HiDream-O1-Image release." \
   --width 2048 --height 2048 --steps 28 --seed 42 \
   --output t2i-dev-output.png
@@ -285,7 +291,7 @@ path configured by the selected profile.
 The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
 
 ```sh
-./build/hidream --model base \
+./build/hidream --model-path artifacts/models/hidream-o1-base-bf16.gguf \
   --prompt "A cinematic portrait in soft natural light." \
   --width 2048 --height 2048 --steps 50 --seed 42 \
   --output t2i-base-output.png
@@ -294,8 +300,7 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
 ### Instruction-based editing
 
 ```sh
-./build/hidream --model dev \
-  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
   --mode edit \
   --ref-image example_assets/edit/test.jpg \
   --prompt "remove the earphones" \
@@ -306,8 +311,7 @@ The Base profile selects the 50-step default FlowUniPC scheduler and CFG:
 ### Multi-reference personalization
 
 ```sh
-./build/hidream --model dev \
-  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
   --mode personalize \
   --ref-image example_assets/IP/1.jpg \
   --ref-image example_assets/IP/2.jpg \
@@ -333,8 +337,7 @@ Skeleton conditioning uses the face, background, OpenPose and body-part
 images as an ordered multi-reference personalization request:
 
 ```sh
-./build/hidream --model dev \
-  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
   --mode personalize \
   --ref-image example_assets/IP_skeleton/0.face.jpg \
   --ref-image example_assets/IP_skeleton/0.bg.jpg \
@@ -353,8 +356,7 @@ Bounding boxes use normalized `[x_min, x_max, y_min, y_max]` coordinates and
 follow the same order as the reference images:
 
 ```sh
-./build/hidream --model dev \
-  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
   --mode layout \
   --ref-image person=example_assets/IP_layout/0.jpg \
   --ref-image object=example_assets/IP_layout/1.jpg \
@@ -370,8 +372,7 @@ With one reference, `--keep-original-aspect` derives patch-aligned output
 dimensions from the source image:
 
 ```sh
-./build/hidream --model dev \
-  --model-dir artifacts/models/hidream-o1-dev-bf16.gguf \
+./build/hidream --model-path artifacts/models/hidream-o1-dev-bf16.gguf \
   --mode edit \
   --ref-image example_assets/edit/test.jpg \
   --keep-original-aspect \
@@ -395,7 +396,8 @@ is the generation itself, not a model reload.
 ```sh
 export LD_LIBRARY_PATH=/home/lvx/.local/lib/python3.12/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
 
-./build/hidream-server --port 8000 --model dev
+./build/hidream-server --port 8000 \
+  --model-path artifacts/models/hidream-o1-dev-bf16.gguf
 ```
 
 Options:
@@ -404,8 +406,9 @@ Options:
 |--------|---------|---------|
 | `--host HOST` | `127.0.0.1` | Listen address |
 | `--port N` | `8000` | TCP port |
-| `--model dev\|base` | `dev` | Profile to load and keep resident |
-| `--model-dir PATH` | per-profile GGUF | Weights directory or `.gguf` pack |
+| `--model-path PATH` | per-profile GGUF | Production GGUF pack; profile inferred from metadata |
+| `--model dev\|base` | `dev` | Internal: safetensors execution profile |
+| `--model-dir PATH` | per-profile GGUF | Internal: weights directory or `.gguf` pack |
 | `--api-key SECRET` | none | Require `Authorization: Bearer SECRET` |
 | `--cors` | off | Emit permissive CORS headers, answer `OPTIONS` with 204 |
 | `--queue-depth N` | `8` | Maximum *waiting* jobs before `429 queue_full` |
