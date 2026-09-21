@@ -5,7 +5,8 @@
 /_reference/
 
 # --- Model weights ---
-/models/
+/models/*
+!/models/manifest.json
 
 # --- Evidence / artifacts (git-ignored per working mode) ---
 /artifacts/

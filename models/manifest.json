@@ -1,0 +1,86 @@
+{
+  "$schema_version": 1,
+  "engine_min_version": "1.0.86",
+  "engine_min_layout_version": 1,
+  "hf_release_repo": "luca-saggese/o1.c-models",
+  "note": "Single source of truth for o1.c model downloads. Read by scripts/download_model.sh, the README model table and the Hugging Face release repository. Do not duplicate these URLs elsewhere.",
+  "models": [
+    {
+      "id": "dev-2604",
+      "display_name": "HiDream-O1-Image-Dev-2604",
+      "filename": "hidream-o1-dev-2604-bf16.gguf",
+      "hf_repo": "luca-saggese/o1.c-models",
+      "download_url": "https://huggingface.co/luca-saggese/o1.c-models/resolve/main/hidream-o1-dev-2604-bf16.gguf",
+      "sha256": "7c405035a9225b721ba19b1a1f4e7f1cb937ddea7dbb7207e5ad677c3e0a7f5d",
+      "size": 17609841152,
+      "profile": "dev",
+      "variant": "dev-2604",
+      "quantization": "bf16",
+      "recommended": true,
+      "min_engine_version": "1.0.86",
+      "min_layout_version": 1,
+      "default_steps": 28,
+      "source_repo": "HiDream-ai/HiDream-O1-Image-Dev-2604",
+      "source_revision": "b6acc2fe452b3120430620dc4354fa442ee081ea"
+    },
+    {
+      "id": "dev",
+      "display_name": "HiDream-O1-Image-Dev",
+      "filename": "hidream-o1-dev-bf16.gguf",
+      "hf_repo": "luca-saggese/o1.c-models",
+      "download_url": "https://huggingface.co/luca-saggese/o1.c-models/resolve/main/hidream-o1-dev-bf16.gguf",
+      "sha256": "4b1141733ec5a99fcbc2994bf720e8ef6ade31ec3e9378e471e73f3af6ce8fae",
+      "size": 17609841152,
+      "profile": "dev",
+      "variant": "dev",
+      "quantization": "bf16",
+      "recommended": false,
+      "min_engine_version": "1.0.86",
+      "min_layout_version": 1,
+      "default_steps": 28,
+      "source_repo": "HiDream-ai/HiDream-O1-Image-Dev",
+      "source_revision": "c0bada0e15c54a9f96a6d1ecc35575b32bc21544"
+    },
+    {
+      "id": "base",
+      "display_name": "HiDream-O1-Image (Base/Full)",
+      "filename": "hidream-o1-base-bf16.gguf",
+      "hf_repo": "luca-saggese/o1.c-models",
+      "download_url": "https://huggingface.co/luca-saggese/o1.c-models/resolve/main/hidream-o1-base-bf16.gguf",
+      "sha256": "07f5efb347cfd9264c8dadd3848bb8c6053633b37a05b0680d920a6409de011b",
+      "size": 17609841152,
+      "profile": "base",
+      "variant": "base",
+      "quantization": "bf16",
+      "recommended": false,
+      "min_engine_version": "1.0.86",
+      "min_layout_version": 1,
+      "default_steps": 50,
+      "source_repo": "HiDream-ai/HiDream-O1-Image",
+      "source_revision": "0b0901d99f200389e138c61946af1185f5f49a13"
+    }
+  ],
+  "unavailable": [
+    {
+      "id": "dev-q4",
+      "display_name": "HiDream-O1-Image-Dev-2604 (Q4)",
+      "quantization": "q4",
+      "status": "unavailable",
+      "reason": "The o1.c GGUF reader currently accepts only F32/F16/BF16 tensors and the runtime has no Q4 weight path. A Q4 release is a separate gate (R8) and is not downloadable."
+    },
+    {
+      "id": "dev-2604-q4",
+      "display_name": "HiDream-O1-Image-Dev-2604 (Q4)",
+      "quantization": "q4",
+      "status": "unavailable",
+      "reason": "See dev-q4."
+    },
+    {
+      "id": "base-q4",
+      "display_name": "HiDream-O1-Image (Base/Full) (Q4)",
+      "quantization": "q4",
+      "status": "unavailable",
+      "reason": "See dev-q4."
+    }
+  ]
+}
