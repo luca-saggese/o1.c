@@ -13,10 +13,7 @@ on Python**.
 </div>
 
 > **HiDream-O1-Image-Dev-2604 debuts at #8 in the Artificial Analysis Text to Image Arena, which is positioned to be the new leading open weights Text to Image model.**
-<p align="center">
-  <img src="example_assets/leaderboard.png" alt="Artificial Analysis Text to Image Arena" width="100%"/>
-  <br><sub><b>Artificial Analysis Text to Image Arena</b> at up to 2,048 × 2,048.</sub>
-</p>
+
 
 <p align="center">
   <img src="example_assets/general.webp" alt="General text-to-image generation" width="100%"/>
